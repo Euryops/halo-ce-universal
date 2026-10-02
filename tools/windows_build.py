@@ -20,8 +20,8 @@ from typing import Any, Dict, List, Optional
 
 from .linux_build import (LINUX_PROFILE, MINIUPNPC_DIR, OPTIMISATION, WINDOWS_PROFILE, XDK_INCLUDE, lto_mode,
                           march_flag, miniupnpc_sources, pgo_mode, compile_launcher, game_defines_and_includes,
-                          game_sources, musl_math_cflags, musl_math_sources, pgo_profile, profile_use_flags,
-                          xdk_headers)
+                          game_sources, gles_defines, musl_math_cflags, musl_math_sources, pgo_profile,
+                          profile_use_flags, xdk_headers)
 from .embed_assets import hud_assets_build, hud_configure_inputs
 from .ninja_syntax import Writer
 
@@ -291,7 +291,8 @@ def generate_windows_build(n: Writer, sln: Any) -> None:
     # the high-res HUD's textures (port/assets/hud; port/linux/src/hud_hires.c)
     embedded_assets = hud_assets_build(n, "windows", BUILD / "generated" / "hud_hires_assets.c")
 
-    abi = " ".join(WINDOWS_ABI_FLAGS + [march_flag(sln)] + (["-DHALO_RELEASE"] if getattr(sln, "port_release", False) else []))
+    abi = " ".join(WINDOWS_ABI_FLAGS + [march_flag(sln)] + (["-DHALO_RELEASE"] if getattr(sln, "port_release", False) else [])
+                   + gles_defines(sln))
     sdl_include = SDL_DIR / "include"
     libs = " ".join(
         [_quote(SDL_DIR / "lib" / "x86" / "SDL3.lib")]
@@ -463,5 +464,20 @@ def generate_windows_build(n: Writer, sln: Any) -> None:
     emit(obj_dir, output, lto_cflags + profile_use_flags(profile),
          lto_cflags + [OPTIMISATION] if lto_cflags else [], [], [profile] if profile else [])
     n.build(outputs=sdl_dll, rule="windows_copy", inputs=SDL_DIR / "lib" / "x86" / "SDL3.dll")
-    n.build(outputs="windows", rule="phony", inputs=[output, sdl_dll])
+    outputs = [output, sdl_dll]
+    if gles_defines(sln):
+        # ANGLE's libEGL.dll, which SDL3 gets the OpenGL ES context through:
+        # the EGL functions' names, each forwarded to ANGLE's libGLESv2.dll
+        # (port/windows/angle/libEGL.c), which is then the one file of ANGLE
+        # to put next to the game
+        egl_dll = BUILD / "libEGL.dll"
+        n.rule(
+            name="windows_forwarder_dll",
+            command="$windows_cc --target=i686-pc-windows-msvc -fuse-ld=lld -shared -nostdlib "
+                    "-Wl,/noentry -Wl,/noimplib $in -o $out",
+            description="WINDOWS DLL $out",
+        )
+        n.build(outputs=egl_dll, rule="windows_forwarder_dll", inputs=PORT_DIR / "angle" / "libEGL.c")
+        outputs.append(egl_dll)
+    n.build(outputs="windows", rule="phony", inputs=outputs)
     n.newline()

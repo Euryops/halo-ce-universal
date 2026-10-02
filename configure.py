@@ -47,6 +47,12 @@ parser.add_argument(
     "machine's (-march=native, the default); use it for builds that run on other computers",
 )
 parser.add_argument(
+    "--gles",
+    action="store_true",
+    help="desktop builds (Linux, Windows): draw with the OpenGL ES 3 renderer instead of OpenGL 4.5's, for graphics "
+    "that have no OpenGL 4.5; on Windows through ANGLE (Direct3D 11) when its libGLESv2.dll is next to the game",
+)
+parser.add_argument(
     "--pgo",
     nargs="?",
     const="train",
@@ -83,6 +89,7 @@ sln = SimpleNamespace(
     port_release=args.release,
     port_lto=args.lto,
     port_portable=args.portable,
+    port_gles=args.gles,
     port_pgo=args.pgo,
     port_pgo_profile=args.pgo_profile,
     android_ndk=args.android_ndk,

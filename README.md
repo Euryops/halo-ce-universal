@@ -126,6 +126,7 @@ Give these options to `configure.py`:
 | (none) | A debug build. A failed assertion stops the game. |
 | `--release` | A release build. The game does not examine assertions, as in the retail game. |
 | `--portable` | The Linux and Windows builds operate on all x86-64 processors. Use this option for builds that you give to other persons. |
+| `--gles` | The Linux and Windows builds show their graphics with OpenGL ES 3, not with OpenGL 4.5. Use this option for graphics hardware that has no OpenGL 4.5. Refer to "Graphics hardware without OpenGL 4.5" in [port/windows/README.md](port/windows/README.md#graphics-hardware-without-opengl-45). |
 | `--lto=thin`, `--lto=off` | Less link-time optimization. The link is faster. |
 | `--pgo=off` | No profile-guided optimization. |
 | `--pgo=train` | Records a new optimization profile. Refer to "Optimization profiles". |

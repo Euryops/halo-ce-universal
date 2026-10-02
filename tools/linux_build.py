@@ -200,6 +200,13 @@ def march_flag(sln: Any) -> str:
     return "-march=x86-64" if getattr(sln, "port_portable", False) else "-march=native"
 
 
+def gles_defines(sln: Any) -> List[str]:
+    """With configure.py --gles, the define that makes a desktop build draw
+    with the OpenGL ES 3 renderer (port/linux/src/gl.h, gles_desktop.c)
+    instead of OpenGL 4.5's: for graphics that have no OpenGL 4.5."""
+    return ["-DHALO_GLES"] if getattr(sln, "port_gles", False) else []
+
+
 def lto_mode(sln: Any) -> str:
     """full, thin or off (configure.py --lto)"""
     return getattr(sln, "port_lto", "full")
@@ -363,7 +370,8 @@ def generate_linux_build(n: Writer, sln: Any) -> None:
     # the high-res HUD's textures (port/assets/hud; port/linux/src/hud_hires.c)
     embedded_assets = hud_assets_build(n, "linux", build_dir / "generated" / "hud_hires_assets.c")
 
-    abi = " ".join(LINUX_ABI_FLAGS + [march_flag(sln)] + (["-DHALO_RELEASE"] if getattr(sln, "port_release", False) else []))
+    abi = " ".join(LINUX_ABI_FLAGS + [march_flag(sln)] + (["-DHALO_RELEASE"] if getattr(sln, "port_release", False) else [])
+                   + gles_defines(sln))
     port_include = PORT_DIR / "include"
     sdk_flags = f"-idirafter {XDK_INCLUDE}"
     libs = " ".join(f"-l{lib}" for lib in config.get("libraries", []))

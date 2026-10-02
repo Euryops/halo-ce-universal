@@ -21,7 +21,8 @@ memory_watch.c detects that by write-protecting the pages.
 #include "../game/cache_file_formats.h"
 
 #include <stdio.h>
-#ifdef HALO_ANDROID
+#ifdef HALO_GLES
+#undef GL_BGRA
 #define GL_BGRA GL_RGBA
 #endif
 #include <stdlib.h>
@@ -398,7 +399,7 @@ static void decode_level(const struct xgpu_texture_description *description, uns
 	}
 }
 
-#ifdef HALO_ANDROID
+#ifdef HALO_GLES
 /* ---------- DXT decoding, for ES drivers without S3TC (Mali) */
 
 static unsigned long color565(unsigned long value)
@@ -538,7 +539,7 @@ static GLenum compressed_format(unsigned char kind)
 /* debug.texture_dump_directory writes level 0 of every upload as a TGA, read back from GL */
 static void texture_dump(GLenum target, const struct xgpu_texture_description *description)
 {
-#ifdef HALO_ANDROID
+#ifdef HALO_GLES
 	/* ES cannot read textures back */
 	(void)target;
 	(void)description;
@@ -672,6 +673,36 @@ void halo_custom_edition_texels_forget(void)
 	custom_edition_texel_capacity = 0;
 }
 
+#if defined(HALO_GLES) && !defined(HALO_ANDROID)
+/* The desktop builds for OpenGL ES (gles_desktop.c) put each channel where
+it is sampled from in the texels, where the others have the texture's
+swizzle do it. With the swizzle, ANGLE on Direct3D 11 drew the hull of the
+Pillar of Autumn nearly black (a10's first scene); with the texels it is as
+OpenGL 4.5 draws it. A compressed texture of a Custom Edition channel order
+is decoded for it. */
+#define CHANNELS_PLACED_IN_TEXELS 1
+
+/* `count` converted texels (32-bit ARGB words) as the bytes ES takes: red,
+green, blue and alpha, each from the channel the order samples it from */
+static void texels_place_channels(unsigned long *texels, unsigned long count, unsigned char channel_order)
+{
+	/* where an ARGB word holds red, green, blue and alpha */
+	static const unsigned char shifts[4] = { 16, 8, 0, 24 };
+	const unsigned char *sources = custom_edition_channel_sources[channel_order];
+	unsigned long red = shifts[sources[0]], green = shifts[sources[1]];
+	unsigned long blue = shifts[sources[2]], alpha = shifts[sources[3]];
+	unsigned long texel;
+
+	for (texel = 0; texel < count; texel++)
+	{
+		unsigned long value = texels[texel];
+
+		texels[texel] = ((value >> red) & 0xff) | (((value >> green) & 0xff) << 8) |
+			(((value >> blue) & 0xff) << 16) | (((value >> alpha) & 0xff) << 24);
+	}
+}
+#endif
+
 static void upload(GLuint texture, GLenum target, const struct xgpu_texture_description *description,
 	const unsigned char *base, const D3DCOLOR *palette, unsigned char channel_order)
 {
@@ -683,18 +714,23 @@ static void upload(GLuint texture, GLenum target, const struct xgpu_texture_desc
 	unsigned long *converted;
 	unsigned long face, level;
 
-#ifdef HALO_ANDROID
+#ifdef HALO_GLES
 	decode_compressed = description->compressed && !xgpu_capabilities.s3tc;
+#endif
+#ifdef CHANNELS_PLACED_IN_TEXELS
+	if (description->compressed && channel_order != _custom_edition_channels_xbox)
+		decode_compressed = TRUE;
 #endif
 	converted = description->compressed && !decode_compressed ? NULL : malloc(largest * sizeof(unsigned long));
 	glBindTexture(target, texture);
 	xgpu_gl_state_invalidate();
+#ifndef CHANNELS_PLACED_IN_TEXELS
 	/* the channel of the texture each channel is sampled from, set on every
 	upload: a texture object can be reused for different texels */
 	{
 		GLint channels[4] = { GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA };
 
-#ifdef HALO_ANDROID
+#ifdef HALO_GLES
 		/* converted texels are BGRA in memory (32-bit ARGB words); ES takes
 		RGBA */
 		if (converted)
@@ -716,6 +752,7 @@ static void upload(GLuint texture, GLenum target, const struct xgpu_texture_desc
 		glTexParameteri(target, GL_TEXTURE_SWIZZLE_B, channels[2]);
 		glTexParameteri(target, GL_TEXTURE_SWIZZLE_A, channels[3]);
 	}
+#endif
 	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 	glTexParameteri(target, GL_TEXTURE_BASE_LEVEL, 0);
 	glTexParameteri(target, GL_TEXTURE_MAX_LEVEL, (GLint)description->levels - 1);
@@ -741,13 +778,17 @@ static void upload(GLuint texture, GLenum target, const struct xgpu_texture_desc
 			}
 			else
 			{
-#ifdef HALO_ANDROID
+#ifdef HALO_GLES
 				if (decode_compressed)
 					dxt_decode_level(information.kind, source, (unsigned long)width, (unsigned long)height,
 						(unsigned long)depth, converted);
 				else
 #endif
 				decode_level(description, level, source, palette, converted);
+#ifdef CHANNELS_PLACED_IN_TEXELS
+				texels_place_channels(converted, (unsigned long)width * (unsigned long)height * (unsigned long)depth,
+					channel_order);
+#endif
 				if (target == GL_TEXTURE_3D)
 					glTexImage3D(image_target, (GLint)level, GL_RGBA8, width, height, depth, 0, GL_BGRA, GL_UNSIGNED_BYTE, converted);
 				else

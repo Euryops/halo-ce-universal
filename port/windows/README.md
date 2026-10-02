@@ -59,6 +59,51 @@ you can find a hang without a debugger. Subtract the image address in the
 log from each address, add `0x400000`, and give the result to
 `llvm-symbolizer --obj=build\windows\halo.exe`.
 
+## Graphics hardware without OpenGL 4.5
+
+The game needs OpenGL 4.5. Some graphics hardware has no driver with
+OpenGL 4.5, for example the Intel HD Graphics of the years before 2016. On
+such a computer, the game writes `cannot create an OpenGL context` to its
+output and shows no window.
+
+The option `--gles` makes a build that shows its graphics with OpenGL ES
+3.0. The renderer is that of the Android build. On Windows, the build gets
+OpenGL ES from ANGLE, which draws with Direct3D 11:
+
+1. Enter `python configure.py --gles`.
+2. Enter `ninja windows`. The build also makes `build/windows/libEGL.dll`
+   (`angle/libEGL.c`), through which SDL3 gets to ANGLE.
+3. Put the `libGLESv2.dll` of a 32-bit (x86) build of ANGLE next to
+   `halo.exe`. The build does not download it. For example, the NuGet
+   package `Avalonia.Angle.Windows.Natives` contains it as
+   `runtimes/win-x86/native/av_libglesv2.dll`. Change the name of that
+   file to `libGLESv2.dll`.
+
+ANGLE gives OpenGL ES 3.0 on graphics hardware with Direct3D feature level
+10.1 or later. If `libGLESv2.dll` is not next to `halo.exe`, the game asks
+the graphics driver for OpenGL ES.
+
+These are the differences from the OpenGL 4.5 build:
+
+- The limits of the OpenGL ES renderer apply. Refer to "OpenGL ES" in
+  [port/android/README.md](../android/README.md#opengl-es).
+- The CPU puts the channels of a texture in their locations. With a
+  swizzle, ANGLE showed some textures almost black. A compressed texture
+  that has a Custom Edition channel order is decoded for this.
+- Direct3D 11 has one blend constant. Thus ANGLE refuses a blend that uses
+  the constant color and the constant alpha together. The meters of the
+  weapons use such a blend. The build uses 1 or 0 as the constant alpha.
+  A meter with a brightness between these shows at full brightness.
+- A level starts some seconds later than in the OpenGL 4.5 build.
+
+The environment variable `HALO_ANGLE_FEATURE_LEVEL` limits the Direct3D
+feature level that ANGLE uses. Set it to `10.1` to test the build for old
+graphics hardware on new graphics hardware. The first lines of the output
+show the feature level as the shader models (`vs_4_1 ps_4_1`).
+
+The Linux build with `--gles` asks the graphics driver for OpenGL ES 3.
+This build is not tested.
+
 ## How the port operates
 
 The game is 32-bit code, as on Linux, because its data contains 32-bit
