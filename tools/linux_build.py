@@ -203,7 +203,9 @@ def march_flag(sln: Any) -> str:
 def gles_defines(sln: Any) -> List[str]:
     """With configure.py --gles, the define that makes a desktop build draw
     with the OpenGL ES 3 renderer (port/linux/src/gl.h, gles_desktop.c)
-    instead of OpenGL 4.5's: for graphics that have no OpenGL 4.5."""
+    instead of OpenGL 4.5's: for graphics that have no OpenGL 4.5. Only the
+    platform layer's units get it (nothing else sees gl.h), so a build
+    changed to or from --gles compiles those again and not the game."""
     return ["-DHALO_GLES"] if getattr(sln, "port_gles", False) else []
 
 
@@ -370,8 +372,7 @@ def generate_linux_build(n: Writer, sln: Any) -> None:
     # the high-res HUD's textures (port/assets/hud; port/linux/src/hud_hires.c)
     embedded_assets = hud_assets_build(n, "linux", build_dir / "generated" / "hud_hires_assets.c")
 
-    abi = " ".join(LINUX_ABI_FLAGS + [march_flag(sln)] + (["-DHALO_RELEASE"] if getattr(sln, "port_release", False) else [])
-                   + gles_defines(sln))
+    abi = " ".join(LINUX_ABI_FLAGS + [march_flag(sln)] + (["-DHALO_RELEASE"] if getattr(sln, "port_release", False) else []))
     port_include = PORT_DIR / "include"
     sdk_flags = f"-idirafter {XDK_INCLUDE}"
     libs = " ".join(f"-l{lib}" for lib in config.get("libraries", []))
@@ -422,6 +423,7 @@ def generate_linux_build(n: Writer, sln: Any) -> None:
         platform_dir = Path(config["platform_sources"])
         platform_cflags = " ".join([
             abi,
+            *gles_defines(sln),
             " ".join(PLATFORM_FLAGS),
             f"-include {prefix_header}",
             f"-include {platform_semantics_header}",

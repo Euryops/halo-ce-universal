@@ -291,8 +291,7 @@ def generate_windows_build(n: Writer, sln: Any) -> None:
     # the high-res HUD's textures (port/assets/hud; port/linux/src/hud_hires.c)
     embedded_assets = hud_assets_build(n, "windows", BUILD / "generated" / "hud_hires_assets.c")
 
-    abi = " ".join(WINDOWS_ABI_FLAGS + [march_flag(sln)] + (["-DHALO_RELEASE"] if getattr(sln, "port_release", False) else [])
-                   + gles_defines(sln))
+    abi = " ".join(WINDOWS_ABI_FLAGS + [march_flag(sln)] + (["-DHALO_RELEASE"] if getattr(sln, "port_release", False) else []))
     sdl_include = SDL_DIR / "include"
     libs = " ".join(
         [_quote(SDL_DIR / "lib" / "x86" / "SDL3.lib")]
@@ -350,6 +349,8 @@ def generate_windows_build(n: Writer, sln: Any) -> None:
         linux_platform = Path(linux_config["platform_sources"])
         platform_cflags = " ".join([
             abi,
+            # (the platform layer alone: linux_build.gles_defines)
+            *gles_defines(sln),
             " ".join(PLATFORM_FLAGS),
             f"-include {prefix_header}",
             f"-I{posix_include}",
