@@ -61,6 +61,13 @@ boolean custom_edition_cache_tags_loaded(
 	void);
 void custom_edition_cache_tags_unload(
 	void);
+/* When a Custom Edition map's tags are loaded, gives the tag cache they are
+in (its address and size) and returns TRUE: what checks that a map's data
+lies in this build's tag cache checks a Custom Edition map's against that
+one. */
+boolean custom_edition_cache_tag_cache_get(
+	void const **tag_cache,
+	unsigned long *tag_cache_bytes);
 
 /* Reads `size` bytes of the loaded map at `offset`, which counts in the
 combined space of the map, its bitmaps.map and its sounds.map

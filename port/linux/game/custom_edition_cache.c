@@ -532,6 +532,20 @@ boolean custom_edition_cache_tags_loaded(
 	return custom_edition_cache_globals.tags_loaded;
 }
 
+boolean custom_edition_cache_tag_cache_get(
+	void const **tag_cache,
+	unsigned long *tag_cache_bytes)
+{
+	if (!custom_edition_cache_globals.tags_loaded)
+	{
+		return FALSE;
+	}
+	*tag_cache = custom_edition_cache_globals.tag_cache;
+	*tag_cache_bytes = CUSTOM_EDITION_TAG_CACHE_BYTES_UPGRADED;
+
+	return TRUE;
+}
+
 void custom_edition_cache_tags_unload(
 	void)
 {

@@ -15,7 +15,7 @@ configure_sampler), as they are larger than they appear.
 
 The PNGs are the ones tools/hud_assets.py and title_assets.py write, so only
 what they write is read: 8-bit RGBA, not interlaced, its data inflated with
-the game's zlib.
+the port's zlib (port/third_party/zlib: a menus folder's PNGs are anyone's).
 */
 
 #include "hud_hires.h"
@@ -23,7 +23,7 @@ the game's zlib.
 #include "port_config.h"
 #include "xgpu.h"
 
-#include "memory/zlib/zlib.h"
+#include "zlib_prefixed.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -32,6 +32,10 @@ the game's zlib.
 long hud_hires_asset_at(unsigned long address, long width, long height);
 
 #define MAXIMUM_TEXTURES 128
+/* a PNG's inflated rows and its texels, which are held at once: 128 MB for
+a 4096 by 4096 sheet (the largest shipped, 2048 by 2048, takes 32 MB), and
+no more for a small file that names a large size (a menus folder's) */
+#define MAXIMUM_DECODED_SIZE (192UL << 20)
 
 static struct
 {
@@ -69,11 +73,13 @@ long hud_hires_asset_fits(long asset, long width, long height)
 long hud_hires_override_find(unsigned long address, unsigned long width, unsigned long height,
 	unsigned long level0_size)
 {
-	static int hud_enabled = -1, titles_enabled = -1;
+	static int hud_enabled, titles_enabled;
+	static unsigned long read_at = (unsigned long)-1;
 	long asset;
 
-	if (hud_enabled < 0)
+	if (read_at != config_changes())
 	{
+		read_at = config_changes();
 		hud_enabled = config_boolean("display.high_res_hud");
 		titles_enabled = config_boolean("display.high_res_text");
 	}
@@ -121,13 +127,14 @@ static unsigned char paeth(unsigned char left, unsigned char up, unsigned char u
 	return to_up <= to_up_left ? up : up_left;
 }
 
-/* the PNG's texels, RGBA in rows top first; NULL if it is not one that
-tools/hud_assets.py writes */
-static unsigned char *png_decode(const struct hud_hires_embedded *embedded)
+/* the PNG's texels, RGBA in rows top first, and its size; NULL if it is not
+one that tools/hud_assets.py writes */
+static unsigned char *png_decode(const unsigned char *data, unsigned long size, unsigned long *png_width,
+	unsigned long *png_height)
 {
-	const unsigned char *data = (const unsigned char *)embedded->png;
-	unsigned long size = embedded->png_size, position = 8;
-	unsigned long width = embedded->width, height = embedded->height;
+	unsigned long position = 8;
+	unsigned long width = size >= 33 ? big_endian_long(data + 16) : 0;
+	unsigned long height = size >= 33 ? big_endian_long(data + 20) : 0;
 	unsigned long stride = width * 4, filtered_size = height * (stride + 1);
 	unsigned char *compressed = NULL, *filtered = NULL, *pixels = NULL;
 	unsigned long compressed_size = 0, row, column;
@@ -135,9 +142,17 @@ static unsigned char *png_decode(const struct hud_hires_embedded *embedded)
 	int result;
 
 	if (size < 33 || memcmp(data, "\x89PNG\r\n\x1a\n", 8) || memcmp(data + 12, "IHDR", 4) ||
-		big_endian_long(data + 16) != width || big_endian_long(data + 20) != height ||
+		!width || !height || width > 8192 || height > 8192 ||
 		data[24] != 8 || data[25] != 6 || data[28] != 0)
 		return NULL;
+	if (filtered_size + stride * height > MAXIMUM_DECODED_SIZE)
+	{
+		platform_log("png: %lux%lu is too large to decode (more than %lu MB)", width, height,
+			MAXIMUM_DECODED_SIZE >> 20);
+		return NULL;
+	}
+	*png_width = width;
+	*png_height = height;
 	compressed = malloc(size);
 	while (compressed && position + 12 <= size)
 	{
@@ -203,12 +218,33 @@ failed:
 	return NULL;
 }
 
+unsigned int hud_hires_png_texture(const void *png, unsigned long size, unsigned long *levels)
+{
+	unsigned long width = 0, height = 0, largest;
+	unsigned char *pixels = png_decode(png, size, &width, &height);
+	GLuint texture;
+
+	if (!pixels)
+		return 0;
+	*levels = 1;
+	for (largest = width > height ? width : height; largest > 1; largest >>= 1)
+		(*levels)++;
+	glGenTextures(1, &texture);
+	glBindTexture(GL_TEXTURE_2D, texture);
+	xgpu_gl_state_invalidate();
+	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, (GLint)*levels - 1);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)width, (GLsizei)height, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+	glGenerateMipmap(GL_TEXTURE_2D);
+	xgpu_gl_state_invalidate();
+	free(pixels);
+	return texture;
+}
+
 unsigned int hud_hires_override_texture(long asset, unsigned long *levels)
 {
 	const struct hud_hires_embedded *embedded;
-	unsigned char *pixels;
-	unsigned long largest;
-	GLuint texture;
 
 	if (asset < 0 || asset >= hud_hires_asset_count() || textures[asset].failed)
 		return 0;
@@ -218,28 +254,13 @@ unsigned int hud_hires_override_texture(long asset, unsigned long *levels)
 		return textures[asset].texture;
 	}
 	embedded = &hud_hires_embedded[asset];
-	pixels = png_decode(embedded);
-	if (!pixels)
+	textures[asset].texture = hud_hires_png_texture(embedded->png, embedded->png_size, &textures[asset].levels);
+	if (!textures[asset].texture)
 	{
 		platform_log("high-res hud: could not decode the texture for %s bitmap %d", embedded->tag, embedded->bitmap);
 		textures[asset].failed = 1;
 		return 0;
 	}
-	textures[asset].levels = 1;
-	for (largest = embedded->width > embedded->height ? embedded->width : embedded->height; largest > 1; largest >>= 1)
-		textures[asset].levels++;
-	glGenTextures(1, &texture);
-	glBindTexture(GL_TEXTURE_2D, texture);
-	xgpu_gl_state_invalidate();
-	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, (GLint)textures[asset].levels - 1);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)embedded->width, (GLsizei)embedded->height, 0,
-		GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-	glGenerateMipmap(GL_TEXTURE_2D);
-	xgpu_gl_state_invalidate();
-	free(pixels);
-	textures[asset].texture = texture;
 	*levels = textures[asset].levels;
-	return texture;
+	return textures[asset].texture;
 }

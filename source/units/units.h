@@ -13,6 +13,17 @@ UNITS.H
 
 /* ---------- constants */
 
+/* a unit's damage animations: flinches (a soft ping plays over its
+animation, a hard ping in its place) and deaths */
+enum
+{
+	_unit_damage_animation_soft_ping = 0,
+	_unit_damage_animation_hard_ping,
+	_unit_damage_animation_soft_kill,
+	_unit_damage_animation_hard_kill,
+	NUMBER_OF_UNIT_DAMAGE_ANIMATIONS
+};
+
 enum
 {
 	MAXIMUM_WEAPONS_PER_UNIT = 4,
@@ -123,6 +134,15 @@ enum
 		FLAG(_unit_control_throw_grenade_bit) |
 		FLAG(_unit_control_swap_weapons_bit),
 };
+
+/* port: the keyboard's action key (port/linux/include/halo_keyboard.h), with
+the action: the action alone, not the reload the controller's X falls back
+to when there is nothing to act on (players.c). It goes with the player's
+action (and over the network) but never to the unit. */
+#define UNIT_CONTROL_PORT_ACTION_ONLY_BIT 15
+typedef char verify_unit_control_port_action_only_bit[
+	UNIT_CONTROL_PORT_ACTION_ONLY_BIT >= NUMBER_OF_UNIT_CONTROL_FLAGS &&
+	UNIT_CONTROL_PORT_ACTION_ONLY_BIT < 16 ? 1 : -1];
 
 enum
 {
@@ -716,6 +736,9 @@ boolean unit_add_equipment_to_inventory(
 	long unit_index,
 	long equipment_index,
 	short replace);
+/* port: the melee damage of a unit with no weapon (units.c) */
+long unit_unarmed_melee_damage(
+	long unit_index);
 boolean unit_add_weapon_to_inventory(
 	long unit_index,
 	long weapon_index,
@@ -746,6 +769,23 @@ boolean unit_is_playing_custom_animation(
 	long unit_index);
 boolean unit_flying_through_air(
 	long unit_index);
+/* port: a unit that feigned death gets back up (units.c) */
+void unit_port_resurrect(
+	long unit_index);
+/* port: whether the unit plays a flinch or death animation of the type,
+switched to the host's if it has only just begun
+(port/linux/game/network_objects.c) */
+boolean unit_port_correct_damage_animation(
+	long unit_index,
+	short type,
+	short animation_index);
+/* port: network co-op (port/linux/game/network_coop.c) */
+void unit_port_play_user_animation(
+	long unit_index,
+	long animation_graph_index,
+	short animation_index,
+	boolean interpolate,
+	short frame_index);
 void unit_stop_custom_animation(
 	long unit_index);
 boolean unit_melee_attack_begin(
@@ -917,6 +957,7 @@ boolean unit_custom_animation_at_frame(
 	short frame_index);
 
 boolean unit_drop_current_weapon(long unit_index, boolean immediate);
+boolean unit_drop_selected_weapon(long unit_index);
 
 boolean unit_throw_grenade_begin(long unit_index, real_vector2d const *alignment_vector);
 
@@ -939,6 +980,15 @@ void unit_scripting_enter_vehicle(
 void unit_preprocess_node_orientations(
 	long unit_index,
 	struct real_orientation *node_orientations);
+/* port: the animations a unit (or vehicle) applies to its orientations */
+struct animation;
+struct animation_graph;
+short unit_animation_model_node_count(
+	long unit_index);
+struct animation *unit_animation_get_fitting(
+	struct animation_graph *animation_graph,
+	short animation_index,
+	short model_node_count);
 void unit_postprocess_node_matrices(
 	long object_index,
 	struct real_matrix4x3 *node_matrices);

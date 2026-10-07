@@ -28,6 +28,15 @@ char **custom_edition_maps_level_list(
 	char **xbox_levels,
 	short xbox_level_count,
 	short *level_count);
+/* The same levels without looking for the maps again, unless they never
+were or custom_edition_maps_look_again asked: for the PC menus' lists
+(port/linux/game/menu_functions.c), which ask for their maps often. */
+char **custom_edition_maps_latest_level_list(
+	char **xbox_levels,
+	short xbox_level_count,
+	short *level_count);
+void custom_edition_maps_look_again(
+	void);
 
 /* The display index of level `level_index` of the latest level list: an
 Xbox level's own index, or a Custom Edition map's display index. */

@@ -9,6 +9,7 @@ controller emulation (see sdl_platform.c).
 #define __HALO_LINUX_SDL_PLATFORM_H
 
 #include <SDL3/SDL_scancode.h>
+#include <stddef.h>
 
 #define PLATFORM_MOUSE_BUTTON_COUNT 8
 
@@ -23,7 +24,30 @@ struct platform_input_state
 	/* the mouse drives the menus' pointer (platform_ui_pointer_set_active)
 	instead of the controller */
 	BOOL ui_pointer;
+	/* a menu is up (platform_menus_set_active): the keys drive the first
+	controller, to move about it, instead of the player's actions */
+	BOOL menus;
 };
+
+/* an input of the keyboard and mouse's controls (xinput_sdl.c): a scancode,
+a mouse button (INPUT_MOUSE + SDL_BUTTON_*), or the wheel */
+#define INPUT_MOUSE SDL_SCANCODE_COUNT
+#define INPUT_WHEEL (INPUT_MOUSE + PLATFORM_MOUSE_BUTTON_COUNT)
+#define INPUT_WHEEL_UP (INPUT_WHEEL + 1)
+#define INPUT_WHEEL_DOWN (INPUT_WHEEL + 2)
+/* an input by its name in config.toml ("W", "Mouse Left"), -1 if none */
+int halo_input_from_name(const char *name);
+void halo_input_name(int input, char *name, size_t size);
+
+/* whether a menu is up (halo_ui_pointer_update, every frame) */
+void platform_menus_set_active(BOOL active);
+/* rebinding a control (Settings > Controls Setup): from now the next key,
+mouse button or wheel turn is taken, and none reaches the game or the
+menus; nor does the keyboard after, until every key and button is up */
+void platform_binding_capture_begin(void);
+/* 0 while waiting; else the capture ends: 1 with the input, 2 for none
+(Delete), 3 if cancelled (Escape) */
+int platform_binding_capture_poll(int *input);
 
 struct platform_keystroke
 {
@@ -38,7 +62,19 @@ BOOL platform_video_initialize(unsigned long width, unsigned long height);
 #ifndef HALO_ANDROID
 BOOL platform_screen_mode(long *width, long *height);
 #endif
+/* Video Setup's resolutions (port/linux/game/menu_tags.c), in pixels: the
+display's modes the game can draw at, largest first, each once, but the
+display's own (Native), and display.resolution's where it is none of them;
+how many. None on Android. */
+int platform_display_resolutions(long *widths, long *heights, int maximum);
+/* Video Setup's window sizes: those of each shape (4:3, 16:10, 16:9, 21:9)
+that fit the desktop, and display.window_size's; how many. None on
+Android. */
+int platform_window_sizes(long *widths, long *heights, int maximum);
 void platform_video_drawable_size(int *width, int *height);
+/* the window's mode and size and V-Sync, from config.toml as Settings has
+just written it (the main thread's) */
+void platform_display_apply(void);
 void platform_video_swap(void);
 /* frames between the 30 Hz ticks at the display's refresh rate, unless
 display.interpolation is false (port/linux/game/render_interpolation.c) */

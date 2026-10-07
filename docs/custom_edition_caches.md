@@ -74,7 +74,10 @@ With the setting on, the multiplayer map list offers every Custom Edition
 multiplayer map in the data root's `maps` folder (OpenSauce `.yelo` maps
 among them) after the thirteen Xbox levels, in the order of their names; the
 pregame lobby and the system link game list show them too
-(`port/linux/game/custom_edition_maps.c`). A map is listed under its file's
+(`port/linux/game/custom_edition_maps.c`). The PC version's menus
+(`display.menus`, the default) list them in their Select Map screen and show
+them in their lobby in the same way (`port/linux/game/menu_functions.c`). A
+map is listed under its file's
 name, `beavercreek_halo3.yelo` as "Beavercreek Halo3", as the level
 `levels\test\<name>\<name>`. The game engine keeps a level name in 64
 characters, so a map whose file name is longer than 25 characters is left
@@ -329,7 +332,10 @@ changed:
   (`custom_edition_objects.c`, called from `object_types_place_all` and
   `game_engine_remap_vehicle`); a variant without
   vehicles still has none, and race, which has no spawn flag, keeps this
-  build's rule.
+  build's rule. The game type's vehicles of each team (the PC menus' game
+  type editor, `game_engine_vehicle_placement_allowed`) are for the maps
+  placed by this build's rule: they do not apply to a Custom Edition map
+  whose vehicles are placed by their spawn flags.
 - **Multiplayer vehicles.** `game_engine_predict_resources` takes the three
   multiplayer vehicles Xbox globals always have; `beavercreek_halo3.yelo` has
   one, and oddball stopped on it. With fewer than three, the native builds

@@ -162,6 +162,7 @@ struct game_options;
 #include "networking/network_messages.h"
 #include "networking/telnet_console.h"
 #include "objects/objects.h"
+#include "objects/widgets/antenna.h"
 #include "objects/widgets/widgets.h"
 #include "physics/breakable_surfaces.h"
 #include "physics/collision_usage.h"
@@ -179,9 +180,12 @@ struct game_options;
 #include "structures/structures.h"
 #include "units/units.h"
 #include "units/vehicles.h"
+#include "network_coop.h" /* port: port/linux/game/network_coop.c */
 
 /* network_game_globals.c's */
 boolean network_game_distributed_client(void);
+/* port: a client drives the host's actors' units as the host sent them (port/linux/game/network_actors.c) */
+void network_actors_drive(void);
 
 /* ---------- constants */
 
@@ -231,6 +235,8 @@ typedef char verify_game_runtime_globals_difficulty_offset[
 static struct game_runtime_globals_prefix *game_globals = NULL;
 extern struct game_variant game_variant_global;
 extern struct data_array *player_data;
+/* port: the PC options the game plays by (game_set_game_variant_options) */
+static struct game_variant_options game_variant_options_global;
 
 char const *global_game_difficulty_level_names[NUMBER_OF_GAME_DIFFICULTY_LEVELS] =
 {
@@ -323,19 +329,31 @@ void game_tick(
 	positions, and could place objects of their own) */
 	if (!network_game_distributed_client())
 		ai_update();
+	else
+		network_actors_drive();
 	players_update_before_game();
 
 	seconds_per_tick = game_globals->players_are_double_speed
 		? 1.0f / (2 * TICKS_PER_SECOND)
 		: 1.0f / TICKS_PER_SECOND;
 	effects_update(seconds_per_tick);
+	/* An antenna's chain is a simulation of the Xbox's own step, an update a
+	tick: stepped a frame at a time, its springs, its carry and its points'
+	physics act against the frames' own movement of it, and a vehicle at
+	speed swings it far wider than a tick's step does. The frames between the
+	ticks are drawn from what each tick leaves (antenna.c). */
+	antennas_update(seconds_per_tick);
 	lock_global_random_seed();
 	rumble_update();
 	first_person_weapons_update();
 	unlock_global_random_seed();
 	game_engine_update();
 	editor_update();
-	hs_update();
+	/* port: in network co-op only the host runs the scripts. A client running
+	them would place the map's actors and objects a second time and make
+	decisions that belong to the host. */
+	if (!(network_game_distributed_client() && network_coop_active()))
+		hs_update();
 	recorded_animations_update();
 	objects_update();
 	players_update_after_game();
@@ -428,8 +446,27 @@ void game_set_game_variant(
 	{
 		game_variant_global = *variant;
 	}
+	/* port: its PC options, until the network game's are given */
+	game_variant_options_default(&game_variant_global, &game_variant_options_global);
 
 	return;
+}
+
+void game_set_game_variant_options(
+	struct game_variant_options const *options)
+{
+	if (options)
+		game_variant_options_global = *options;
+	else
+		game_variant_options_default(&game_variant_global, &game_variant_options_global);
+
+	return;
+}
+
+struct game_variant_options const *game_variant_options_get(
+	void)
+{
+	return &game_variant_options_global;
 }
 
 void game_set_game_engine_index(
@@ -632,6 +669,14 @@ void game_initialize_for_new_map(
 	ui_widgets_safe_to_load(TRUE);
 
 	return;
+}
+
+/* port: whether a map is loaded, the main menu's too: game_in_progress()
+is not, once game_time_end() stops its clock */
+boolean game_map_loaded(
+	void)
+{
+	return game_globals->map_loaded;
 }
 
 boolean game_map_loading_in_progress(
@@ -896,7 +941,9 @@ void remove_quitting_players_from_game(
 	struct player_datum *player;
 	long current_time;
 
-	if (!game_engine_running())
+	/* port: also in network co-op, which has no game engine. Without this a
+	player who left kept their unit, and it respawned. */
+	if (!game_engine_running() && !network_coop_active())
 		return;
 
 	current_time = game_time_get();

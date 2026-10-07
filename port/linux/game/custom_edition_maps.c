@@ -38,6 +38,8 @@ in lines of about 20 characters.
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <xtl.h>
 
 /* ---------- constants */
 
@@ -317,25 +319,49 @@ static void custom_edition_maps_look_for(
 	void)
 {
 	struct custom_edition_maps_globals *globals = &custom_edition_maps_globals;
-	struct file_reference directory;
-	struct file_reference file;
-	char name[MAXIMUM_FILENAME_LENGTH + 1];
-	char extension[MAXIMUM_FILENAME_LENGTH + 1];
+	char const *directory = cache_files_map_directory();
+	char pattern[MAXIMUM_FILENAME_LENGTH + 1];
+	WIN32_FIND_DATAA data;
+	HANDLE find;
 
 	custom_edition_maps_forget();
 	globals->looked_for = TRUE;
-	if (!halo_custom_edition_tag_cache())
+	if (!halo_custom_edition_tag_cache() ||
+		csstrlen(directory) + sizeof("*.*") > sizeof(pattern))
 	{
 		return;
 	}
 
-	file_reference_create_from_path(&directory, cache_files_map_directory(), TRUE);
-	find_files_start(0, &directory);
-	while (find_files_next(&file, NULL))
+	/* The folder is listed through a handle of its own, never with
+	find_files_start and find_files_next: those keep their place in one
+	global, and as the game starts a thread of the menus' uses them to delete
+	the files of folders (perform_filesystem_initialization in ui_widget.c,
+	directory_create_or_delete_contents). A second listing at the same time
+	takes that one's place, and the thread then deletes the files of this
+	folder: the maps. */
+	csprintf(pattern, "%s*.*", directory);
+	find = FindFirstFileA(pattern, &data);
+	if (find != INVALID_HANDLE_VALUE)
 	{
-		file_reference_get_name(&file, FLAG(_name_filename_bit), name);
-		file_reference_get_name(&file, FLAG(_name_extension_bit), extension);
-		custom_edition_map_add(name, extension);
+		do
+		{
+			char name[sizeof(data.cFileName) + 1];
+			char *extension;
+
+			if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+			{
+				continue;
+			}
+			csmemcpy(name, data.cFileName, sizeof(data.cFileName));
+			name[sizeof(data.cFileName)] = 0;
+			extension = strrchr(name, '.');
+			if (extension)
+			{
+				*extension++ = 0;
+				custom_edition_map_add(name, extension);
+			}
+		} while (FindNextFileA(find, &data));
+		CloseHandle(find);
 	}
 	qsort(globals->maps, globals->map_count, sizeof(globals->maps[0]), custom_edition_map_compare);
 	error(_error_silent, "custom edition: %d multiplayer maps for the level list", globals->map_count);
@@ -430,6 +456,16 @@ char **custom_edition_maps_level_list(
 	short xbox_level_count,
 	short *level_count)
 {
+	custom_edition_maps_look_again();
+
+	return custom_edition_maps_latest_level_list(xbox_levels, xbox_level_count, level_count);
+}
+
+char **custom_edition_maps_latest_level_list(
+	char **xbox_levels,
+	short xbox_level_count,
+	short *level_count)
+{
 	struct custom_edition_maps_globals *globals = &custom_edition_maps_globals;
 	short level_index;
 	short map_index;
@@ -439,7 +475,10 @@ char **custom_edition_maps_level_list(
 	{
 		globals->levels[level_index] = xbox_levels[level_index];
 	}
-	custom_edition_maps_look_for();
+	if (!globals->looked_for)
+	{
+		custom_edition_maps_look_for();
+	}
 	for (map_index = 0; map_index < globals->map_count; map_index++)
 	{
 		globals->levels[globals->xbox_level_count + map_index] = globals->maps[map_index].level_name;
@@ -447,6 +486,14 @@ char **custom_edition_maps_level_list(
 	*level_count = globals->xbox_level_count + globals->map_count;
 
 	return globals->levels;
+}
+
+void custom_edition_maps_look_again(
+	void)
+{
+	custom_edition_maps_globals.looked_for = FALSE;
+
+	return;
 }
 
 short custom_edition_maps_level_display_index(
