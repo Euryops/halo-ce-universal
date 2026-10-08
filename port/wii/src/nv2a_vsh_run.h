@@ -142,6 +142,9 @@ struct nv2a_vsh_compiled_instruction
 	nothing in this instruction reads what it overwrites */
 	uint8_t mac_direct;
 	uint8_t captures_clip;
+	/* how many dot products (this and the ones after it) run as one: the
+	same A, each its own B and a component of the one row they write */
+	uint8_t group;
 	/* the components of each operand, after its swizzle, that are used,
 	and where each is read from */
 	uint8_t needs[3];

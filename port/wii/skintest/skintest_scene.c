@@ -676,10 +676,10 @@ static void set_lighting(float time)
 	lighting[5][3] = 1.0f;
 	/* the sun, and a blue fill from below */
 	set3(lighting[6], -0.45f, -0.3f, -0.84f);
-	set3(lighting[7], 0.75f, 0.72f, 0.62f);
+	set3(lighting[7], 0.95f, 0.9f, 0.78f);
 	set3(lighting[8], 0.2f, 0.3f, 0.93f);
 	set3(lighting[9], 0.1f, 0.14f, 0.25f);
-	set3(lighting[10], 0.16f, 0.17f, 0.2f);
+	set3(lighting[10], 0.3f, 0.31f, 0.34f);
 	IDirect3DDevice8_SetVertexShaderConstant(device, -79, lighting, 11);
 }
 
@@ -879,12 +879,12 @@ static D3DTexture *grass_texture(void)
 			BOOL blade = FALSE;
 			int k;
 
-			for (k = 0; k < 3; k++)
+			for (k = 0; k < 4; k++)
 			{
-				float base = 3.0f + k * 5.0f + sprite;
-				float lean = (k - 1) * 3.0f * height * height;
-				float width = 1.6f * (1.0f - height);
-				float tall = 0.6f + 0.13f * ((k + sprite * 2) % 4);
+				float base = 2.5f + k * 3.6f + (sprite & 1);
+				float lean = (k - 1.5f) * 2.5f * height * height;
+				float width = 2.2f * (1.0f - height) + 0.3f;
+				float tall = 0.45f + 0.15f * ((k + sprite * 3) % 4);
 
 				if (height < tall && fabsf(local - base - lean) < width + 0.4f)
 					blade = TRUE;
@@ -967,13 +967,14 @@ static void set_grass_constants(void)
 
 	for (type = 0; type < 2; type++)
 	{
-		const float near_fade = 18.0f, far_fade = 30.0f, size = type ? 0.022f : 0.016f;
+		const float near_fade = 18.0f, far_fade = 30.0f, size = type ? 0.009f : 0.006f;
 		float range = 1.0f / (far_fade - near_fade);
 
 		types[type][0] = range * far_fade;
 		types[type][1] = -range;
-		/* a sprite is 16 by 64 texels of the bitmap */
-		types[type][2] = 16.0f * size;
+		/* a sprite is 16 by 64 texels of the bitmap, drawn half as tall
+		again as it is wide over its own */
+		types[type][2] = 32.0f * size;
 		types[type][3] = 64.0f * size;
 	}
 	for (sprite = 0; sprite < GRASS_SPRITES; sprite++)
@@ -1134,7 +1135,7 @@ static void set_plasma_constants(float time)
 {
 	const float primary_scale = 1.6f, secondary_scale = 2.7f, offset = 0.05f;
 	const float primary_time = time / 2.0f, secondary_time = time / 3.1f;
-	const float perpendicular[4] = { 0.25f, 0.55f, 1.0f, 0.9f }, parallel[4] = { 0.05f, 0.12f, 0.35f, 0.15f };
+	const float perpendicular[4] = { 0.2f, 0.45f, 0.9f, 0.55f }, parallel[4] = { 0.02f, 0.05f, 0.15f, 0.05f };
 	float vertex_constants[6][4], colors[3][4];
 	int k;
 
@@ -1393,6 +1394,84 @@ static void log_timings(const char *phase, unsigned long frames)
 	}
 }
 
+/* the batch executor against the interpreter on the Wii's CPU, which the
+host's tests cannot be (their compiler, their square root, their floor
+are the host's): each of the game's 67 programs on random vertices and
+constants, compiled for every output, every result compared to the bit */
+static void self_check(void)
+{
+	static const uint8_t all_outputs[16] =
+	{
+		0xf, 0xf, 0xf, 0xf, 0xf, 0xf, 0xf, 0xf, 0xf, 0xf, 0xf, 0xf, 0xf, 0xf, 0xf, 0xf,
+	};
+	static struct nv2a_vsh_program program;
+	static struct nv2a_vsh_compiled compiled;
+	static struct nv2a_vsh_lanes lanes;
+	static float constants[NV2A_VSH_CONSTANT_COUNT][4];
+	unsigned long seed = 2463534242UL;
+	int index, matched = 0, first_failure = -1;
+
+#define RANDOM() (seed ^= seed << 13, seed ^= seed >> 17, seed ^= seed << 5, seed)
+#define RANDOM_FLOAT() ((float)(RANDOM() & 0xffff) / 16384.0f - 2.0f)
+	for (index = 0; index < 67; index++)
+	{
+		const DWORD *words = (const DWORD *)vertex_shader_code + program_offsets[index] / 4;
+		float inputs[NV2A_VSH_BATCH][NV2A_VSH_ATTRIBUTE_COUNT][4];
+		unsigned long lane;
+		int row, component, same = 1, round;
+
+		nv2a_vsh_decode((const uint32_t *)words + 1, words[0] >> 16, &program);
+		nv2a_vsh_compile(&program, all_outputs, &compiled);
+		for (round = 0; round < 4 && same; round++)
+		{
+			for (row = 0; row < NV2A_VSH_CONSTANT_COUNT; row++)
+				for (component = 0; component < 4; component++)
+					constants[row][component] = RANDOM_FLOAT();
+			constants[NV2A_VSH_CONSTANT_BIAS - 89][3] = 255.9375f;
+			for (lane = 0; lane < NV2A_VSH_BATCH; lane++)
+			{
+				for (row = 0; row < NV2A_VSH_ATTRIBUTE_COUNT; row++)
+				{
+					for (component = 0; component < 4; component++)
+					{
+						inputs[lane][row][component] = RANDOM_FLOAT();
+						lanes.rows[NV2A_VSH_FILE_INPUTS + row][component][lane] = inputs[lane][row][component];
+					}
+				}
+				/* node indices as the models have them */
+				inputs[lane][5][0] = lanes.rows[NV2A_VSH_FILE_INPUTS + 5][0][lane] = (float)(3 * (RANDOM() % 44)) / 255.0f;
+				inputs[lane][5][1] = lanes.rows[NV2A_VSH_FILE_INPUTS + 5][1][lane] = (float)(3 * (RANDOM() % 44)) / 255.0f;
+			}
+			nv2a_vsh_run_batch(&compiled, (const float (*)[4])constants, &lanes, NV2A_VSH_BATCH);
+			for (lane = 0; lane < NV2A_VSH_BATCH && same; lane++)
+			{
+				struct nv2a_vsh_result expected, got;
+
+				memset(&expected, 0, sizeof(expected));
+				memset(&got, 0, sizeof(got));
+				nv2a_vsh_run(&program, (const float (*)[4])constants, (const float (*)[4])inputs[lane], &expected);
+				nv2a_vsh_lanes_result(&compiled, &lanes, lane, &got);
+				if (!expected.clip_captured)
+					memset(expected.clip, 0, sizeof(expected.clip)), memset(got.clip, 0, sizeof(got.clip));
+				/* (a NaN may have other bits; none of these programs makes one
+				from these inputs) */
+				if (memcmp(&expected, &got, sizeof(expected)))
+					same = 0;
+			}
+		}
+		if (same)
+			matched++;
+		else if (first_failure < 0)
+			first_failure = index;
+	}
+#undef RANDOM
+#undef RANDOM_FLOAT
+	platform_log("self check: %d of 67 programs run by the batch executor as by the interpreter, to the bit, on this"
+		" CPU%s", matched, first_failure < 0 ? "" : " (NOT ALL)");
+	if (first_failure >= 0)
+		platform_log("self check: the first that differs is program %d", first_failure);
+}
+
 /* where a skinned vertex's time goes on the Wii's CPU, the device's steps
 one at a time on the character's vertices: reading them into a batch
 (nv2a_vsh_fetch_lanes), running the program (nv2a_vsh_run_batch, compiled
@@ -1525,6 +1604,7 @@ void skintest_run(void)
 	ground_texture = dirt_texture();
 	platform_log("the scene is made: %lu vertices a character in %d nodes, %lu grass sprites",
 		(unsigned long)CHARACTER_VERTICES, NODE_COUNT, (unsigned long)(GRASS_CELLS * GRASS_CELLS * GRASS_PER_CELL));
+	self_check();
 	benchmark();
 
 	for (frame = 0; frame < HERO_FRAMES; frame++)

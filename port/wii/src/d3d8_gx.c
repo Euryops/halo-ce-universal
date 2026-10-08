@@ -12,8 +12,9 @@ differs from the Linux port is where the work is done:
 
 - Vertex programs run on the CPU (nv2a_vsh_run.c): GX has no programmable
   vertex stage. Each draw's vertices are read from the game's buffers by the
-  vertex shader's declaration, run through its program, and handed to GX
-  with the program's position, diffuse color and texture coordinates.
+  vertex shader's declaration, sixteen at a time, run through its program
+  (compiled when the shader is made, for the outputs read here), and handed
+  to GX with the program's position, colors and texture coordinates.
 - GX's fixed transform does the rest. The programs end in screen space
   (c[-38], c[-37]); that conversion is undone to a clip-space position, and
   the draw's projection is fitted: Halo's 3D draws are a perspective
@@ -45,6 +46,7 @@ differs from the Linux port is where the work is done:
 #include "halo_ui_pointer.h"
 
 #include <math.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -72,8 +74,10 @@ struct vertex_shader_object
 {
 	unsigned long signature;
 	unsigned long id;
-	struct nv2a_vsh_program *program;
-	/* the program compiled for the outputs the device reads (nv2a_vsh_run.h) */
+	/* the program's length in the NV2A's instruction slots, and the program
+	compiled for the outputs the device reads (nv2a_vsh_run.h), only as
+	long as the instructions it keeps: the heap is small */
+	unsigned long instruction_count;
 	struct nv2a_vsh_compiled *compiled;
 	struct vertex_element elements[NV2A_VSH_ATTRIBUTE_COUNT];
 	unsigned long element_count;
@@ -680,24 +684,27 @@ HRESULT WINAPI D3DDevice_CreateVertexShader(CONST DWORD *declaration, CONST DWOR
 	object->id = device.next_vertex_shader_id++;
 	if (function)
 	{
-		unsigned long index;
+		/* (one at a time: the game makes its shaders on its main thread) */
+		static struct nv2a_vsh_program program;
+		static struct nv2a_vsh_compiled compiled;
 
-		object->program = malloc(sizeof(*object->program));
-		object->compiled = malloc(sizeof(*object->compiled));
 		/* header: program type in the low word, instruction count in the high */
-		if (!object->program || !object->compiled ||
-			!nv2a_vsh_decode((const uint32_t *)(function + 1), function[0] >> 16, object->program))
+		if (!nv2a_vsh_decode((const uint32_t *)(function + 1), function[0] >> 16, &program))
 		{
 			platform_log("Direct3D: vertex shader %lu has %lu instructions, more than the NV2A's",
 				object->id, (unsigned long)(function[0] >> 16));
-			free(object->program);
-			free(object->compiled);
-			object->program = NULL;
-			object->compiled = NULL;
 		}
 		else
 		{
-			nv2a_vsh_compile(object->program, device_outputs, object->compiled);
+			unsigned long bytes;
+
+			nv2a_vsh_compile(&program, device_outputs, &compiled);
+			bytes = offsetof(struct nv2a_vsh_compiled, instructions) +
+				compiled.count * sizeof(compiled.instructions[0]);
+			object->instruction_count = program.count;
+			object->compiled = malloc(bytes);
+			if (object->compiled)
+				memcpy(object->compiled, &compiled, bytes);
 		}
 	}
 	parse_declaration(object, declaration);
@@ -750,7 +757,7 @@ void WINAPI D3DDevice_GetVertexShaderSize(DWORD handle, UINT *size)
 {
 	struct vertex_shader_object *object = vertex_shader_from_handle(handle);
 
-	*size = object && object->program ? object->program->count : 0;
+	*size = object ? object->instruction_count : 0;
 }
 
 void WINAPI D3DDevice_SetVertexShaderConstant(INT reg, CONST void *constant_data, DWORD constant_count)

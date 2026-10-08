@@ -525,6 +525,10 @@ void nv2a_vsh_run(const struct nv2a_vsh_program *program, const float (*constant
 
 /* ---------- the batch executor */
 
+/* its loops are short and many: unrolled, the Wii's CPU spends less of
+each on counting */
+#pragma GCC optimize ("unroll-loops")
+
 #define ROW_OFFSET(row, component) ((((row) * 4) + (component)) * NV2A_VSH_BATCH)
 #define CONSTANT_OFFSET(slot) (NV2A_VSH_FILE_COUNT * 4 * NV2A_VSH_BATCH + (slot) * NV2A_VSH_BATCH)
 
@@ -650,6 +654,90 @@ static int constant_slot(struct nv2a_vsh_compiled *compiled, unsigned constant, 
 	compiled->slot_negates[slot] = (uint8_t)negate;
 	compiled->slot_count++;
 	return (int)slot;
+}
+
+/* whether an instruction can join a run of dot products: a dot product of
+rows, written to one component of one row, and nothing else */
+static int dot_product_alone(const struct nv2a_vsh_compiled_instruction *instruction)
+{
+	int which, component;
+	unsigned used = instruction->mac_used;
+
+	if ((instruction->mac != _mac_dp3 && instruction->mac != _mac_dph && instruction->mac != _mac_dp4) ||
+		instruction->ilu_used || instruction->captures_clip || !instruction->mac_direct ||
+		!used || (used & (used - 1)))
+		return 0;
+	for (which = 0; which < 2; which++)
+		for (component = 0; component < 4; component++)
+			if ((instruction->needs[which] & (8 >> component)) && instruction->sources[which][component].kind != 0)
+				return 0;
+	return 1;
+}
+
+static unsigned destination_row(const struct nv2a_vsh_compiled_instruction *instruction)
+{
+	return instruction->mac_mask ? instruction->mac_row : instruction->mac_output_row;
+}
+
+/* whether an operand of an instruction reads the row */
+static int reads_row(const struct nv2a_vsh_compiled_instruction *instruction, unsigned row)
+{
+	unsigned long first = ROW_OFFSET(row, 0), last = ROW_OFFSET(row, 3);
+	int which, component;
+
+	for (which = 0; which < 2; which++)
+		for (component = 0; component < 4; component++)
+			if ((instruction->needs[which] & (8 >> component)) &&
+				instruction->sources[which][component].offset >= first &&
+				instruction->sources[which][component].offset <= last)
+				return 1;
+	return 0;
+}
+
+/* runs of up to four dot products of one kind with the same A, writing
+different components of one row that none of them reads (a matrix by a
+vector: the position by the world-view-projection, the skinned position and
+normal, the texture coordinates): the first of the run is marked with its
+length, and runs them all in one pass over the batch */
+static void group_dot_products(struct nv2a_vsh_compiled *compiled)
+{
+	unsigned long index = 0;
+
+	while (index < compiled->count)
+	{
+		struct nv2a_vsh_compiled_instruction *head = &compiled->instructions[index];
+		unsigned long length = 1;
+		unsigned written;
+
+		if (!dot_product_alone(head) || reads_row(head, destination_row(head)))
+		{
+			index++;
+			continue;
+		}
+		written = head->mac_used;
+		while (length < 4 && index + length < compiled->count)
+		{
+			const struct nv2a_vsh_compiled_instruction *next = &compiled->instructions[index + length];
+			int component, same = 1;
+
+			if (!dot_product_alone(next) || next->mac != head->mac ||
+				destination_row(next) != destination_row(head) || (next->mac_used & written) ||
+				reads_row(next, destination_row(head)))
+				break;
+			for (component = 0; component < 4; component++)
+			{
+				if ((head->needs[0] & (8 >> component)) &&
+					next->sources[0][component].offset != head->sources[0][component].offset)
+					same = 0;
+			}
+			if (!same)
+				break;
+			written |= next->mac_used;
+			length++;
+		}
+		head->group = (uint8_t)(length > 1 ? length : 0);
+		index += length;
+	}
 }
 
 void nv2a_vsh_compile(const struct nv2a_vsh_program *program, const uint8_t outputs[16],
@@ -824,6 +912,7 @@ void nv2a_vsh_compile(const struct nv2a_vsh_program *program, const uint8_t outp
 			compiled->clip_captured = 1;
 	}
 	compiled->count = count;
+	group_dot_products(compiled);
 }
 
 /* each loop runs over the batch's vertices; the rows it reads and writes
@@ -872,6 +961,75 @@ static int first_component(unsigned mask)
 	return mask & 8 ? 0 : mask & 4 ? 1 : mask & 2 ? 2 : mask & 1 ? 3 : -1;
 }
 
+/* a run of dot products (group_dot_products): A read once a vertex, each
+member's B, each member's result to its component of the row; the sums in
+the order the single instructions make them */
+static void run_dot_products(const struct nv2a_vsh_compiled_instruction *head, float *base,
+	struct nv2a_vsh_lanes *lanes, unsigned long count)
+{
+	const float *a[4], *b[4][4];
+	float *out[4];
+	unsigned row = head->mac_mask ? head->mac_row : head->mac_output_row;
+	int members = head->group, member, component;
+
+	for (component = 0; component < 4; component++)
+		a[component] = (head->needs[0] & (8 >> component)) ? base + head->sources[0][component].offset : NULL;
+	for (member = 0; member < members; member++)
+	{
+		const struct nv2a_vsh_compiled_instruction *instruction = head + member;
+
+		for (component = 0; component < 4; component++)
+			b[member][component] = (instruction->needs[1] & (8 >> component)) ?
+				base + instruction->sources[1][component].offset : NULL;
+		out[member] = lanes->rows[row][first_component(instruction->mac_used)];
+	}
+
+#define DOT3(m) (a0[lane] * b[m][0][lane] + a1[lane] * b[m][1][lane] + a2[lane] * b[m][2][lane])
+	switch (head->mac)
+	{
+	case _mac_dp3:
+	{
+		const float *a0 = a[0], *a1 = a[1], *a2 = a[2];
+
+		if (members == 2)
+			LANES(out[0][lane] = DOT3(0); out[1][lane] = DOT3(1));
+		else if (members == 3)
+			LANES(out[0][lane] = DOT3(0); out[1][lane] = DOT3(1); out[2][lane] = DOT3(2));
+		else
+			LANES(out[0][lane] = DOT3(0); out[1][lane] = DOT3(1); out[2][lane] = DOT3(2); out[3][lane] = DOT3(3));
+		break;
+	}
+	case _mac_dph:
+	{
+		const float *a0 = a[0], *a1 = a[1], *a2 = a[2];
+
+		if (members == 2)
+			LANES(out[0][lane] = DOT3(0) + b[0][3][lane]; out[1][lane] = DOT3(1) + b[1][3][lane]);
+		else if (members == 3)
+			LANES(out[0][lane] = DOT3(0) + b[0][3][lane]; out[1][lane] = DOT3(1) + b[1][3][lane];
+				out[2][lane] = DOT3(2) + b[2][3][lane]);
+		else
+			LANES(out[0][lane] = DOT3(0) + b[0][3][lane]; out[1][lane] = DOT3(1) + b[1][3][lane];
+				out[2][lane] = DOT3(2) + b[2][3][lane]; out[3][lane] = DOT3(3) + b[3][3][lane]);
+		break;
+	}
+	default:
+	{
+		const float *a0 = a[0], *a1 = a[1], *a2 = a[2], *a3 = a[3];
+
+		for (member = 0; member < members; member++)
+		{
+			float *o = out[member];
+			const float *b0 = b[member][0], *b1 = b[member][1], *b2 = b[member][2], *b3 = b[member][3];
+
+			LANES(o[lane] = a0[lane] * b0[lane] + a1[lane] * b1[lane] + a2[lane] * b2[lane] + a3[lane] * b3[lane]);
+		}
+		break;
+	}
+	}
+#undef DOT3
+}
+
 void nv2a_vsh_run_batch(const struct nv2a_vsh_compiled *compiled, const float (*constants)[4],
 	struct nv2a_vsh_lanes *lanes, unsigned long count)
 {
@@ -918,6 +1076,14 @@ void nv2a_vsh_run_batch(const struct nv2a_vsh_compiled *compiled, const float (*
 	{
 		const struct nv2a_vsh_compiled_instruction *instruction = &compiled->instructions[index];
 		const float *operands[3][4];
+
+		if (instruction->group)
+		{
+			run_dot_products(instruction, base, lanes, count);
+			index += instruction->group - 1;
+			continue;
+		}
+		{
 		float (*mac)[NV2A_VSH_BATCH] = lanes->results[0];
 		float (*ilu)[NV2A_VSH_BATCH] = lanes->results[1];
 		float *scalar = lanes->results[2][0];
@@ -1177,6 +1343,7 @@ void nv2a_vsh_run_batch(const struct nv2a_vsh_compiled *compiled, const float (*
 				store(lanes->rows[instruction->ilu_row], instruction->ilu_mask, ilu, count);
 			if (instruction->ilu_output_mask)
 				store(lanes->rows[instruction->ilu_output_row], instruction->ilu_output_mask, ilu, count);
+		}
 		}
 	}
 }

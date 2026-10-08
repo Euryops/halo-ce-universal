@@ -61,8 +61,8 @@ short:
 
 - **Vertex programs run on the CPU.** GX has no vertex programs, so each draw's vertices
   are read from the game's buffers by the shader's declaration and run through the
-  game's own NV2A program by `src/nv2a_vsh_run.c`, an interpreter of the microcode with
-  the semantics of the Linux port's GLSL translation.
+  game's own NV2A program by `src/nv2a_vsh_run.c`, with the semantics of the Linux port's
+  GLSL translation, sixteen vertices at a time (below: "Vertex programs on the CPU").
 - **GX's fixed transform does the projection.** The programs end in screen space; that
   is undone to a clip position, and a perspective matrix is fitted to each draw (Halo's
   depth is an affine function of w across a draw), so GX clips and interpolates
@@ -85,7 +85,7 @@ the same reason as `wii_os.h`.
 
 ### Checking it
 
-    ./port/wii/tests/run.sh       # the interpreter against all 67 of the game's programs (host cc)
+    ./port/wii/tests/run.sh       # the vertex programs and the pixel shaders, on the host (below)
 
 With no maps the game cannot reach its menu, so `build.sh` also makes
 `build/wii/gxtest/sd/apps/halo-gxtest/boot.dol`, a scene (`gxtest/gxtest_scene.c`) that
@@ -143,6 +143,86 @@ reference:
 `check.py` prints each tile's worst and mean difference from the NV2A's and from the TEV
 model's, and writes `sheet.png`: Dolphin's sheet, the reference, and their difference
 eight times over.
+
+## Vertex programs on the CPU: skinning and the effects (stage 4, third part)
+
+![skintest.dol in Dolphin](skintest/sheet.png)
+
+GX has a fixed transform and no vertex programs, so all 67 of the game's NV2A programs run
+on the Wii's CPU (`src/nv2a_vsh_run.c`): the skinned models (23 programs read their node
+matrices at `c[-36]` through `a0`, from node index bytes that are node numbers times three,
+with `c[-89].w` = 255.9375), and the effects that are made in the vertex program: the
+plasma shell pushed out along the skinned normal, the detail objects' grass built as
+sprites from packed bytes, glass, meters, fog and the rest.
+
+- **Two executors, one meaning.** `nv2a_vsh_run` interprets a program for one vertex; it
+  is the reference. `nv2a_vsh_run_batch` is what the device runs. A program is compiled
+  once, when the game creates its shader (`nv2a_vsh_compile`), for the outputs the device
+  reads: the components nothing reads afterwards are dropped, and the instructions left
+  with none. The compiled program then runs each instruction over a batch of 16
+  vertices, the registers laid out by component and then by vertex. The constant
+  components it reads are spread across the batch first, so every operand is a row and
+  every loop is branch-free. Runs of dot products that share their first operand (a
+  matrix by a vector) go in one pass. Its results are the interpreter's, bit for bit.
+- **The fetch** reads a batch at a time (`nv2a_vsh_fetch_lanes`), in the Wii's byte
+  order: the map converter swaps the models' shorts and leaves their node index bytes.
+- **Broadway has no square root instruction.** `rsq` is its reciprocal square root
+  estimate made exact with three Newton steps, `floor` is inline, and the fetch multiplies
+  where it divided (a division is 17 cycles).
+
+### Checking it
+
+    ./port/wii/tests/run.sh
+
+runs `tests/vsh_gl_test.c` after the interpreter's own tests. The Linux port's translator
+(`port/linux/src/nv2a_vsh.c`, built on the host through `tests/xgpu_host.h`) turns each of
+the 67 programs into the GLSL the PC build draws with. Mesa's software GL runs that GLSL
+headless (EGL's surfaceless platform; it needs only `libEGL.so.1`, and the test skips
+itself without it), and transform feedback hands back every output of every vertex. The
+same vertices, laid out by the program's own declaration, go through the Wii's fetch, the
+interpreter and the clip recovery. Every output must agree with the GL reference: the clip
+position, both colors and back colors, four texture coordinates and the fog. The batch
+executor must agree with the interpreter to the bit, compiled for every output and then
+for random subsets, with the device's batch fetch. A deliberate break in the fetch's
+scale, the `arl` rounding or the liveness fails it.
+`tests/vsh_dis.c` prints a program as it decodes; `tests/vsh_bench.c` times the two
+executors on the host.
+
+In Dolphin, `build.sh` makes `build/wii/skintest/sd/apps/halo-skintest/boot.dol`:
+
+    mkdir -p <card>
+    DOLPHIN_FRAME_DUMP_RAW=1 ~/euryo/scripts/dolphin/run.sh \
+        build/wii/skintest/sd/apps/halo-skintest/boot.dol 80 <outdir> <card>
+    python3 port/wii/skintest/check.py <outdir>/Dump/Frames sheet.png
+    cat <card>/skintest.txt
+
+`skintest/skintest_scene.c` draws three walking characters of eleven nodes, made of the
+game's compressed model vertices, through the device. Each is drawn with one of the model
+shader's skinned programs (10 point lights, 9 reflection, 17 planar fog), with the
+game's camera, fog and lighting constants. There is also a rifle of one node in a hand
+(27), a plasma shell with the game's constants and pixel shader (15), and grass (33). After
+five seconds the screen splits. The left half is skinned by the programs; the right half
+by the formula the game's own debug code uses (`rasterizer_debug_model_vertices`) on the
+CPU, drawn with one identity node. Everything after the skinning is the same program on
+both sides, so `check.py` requires the halves to agree. Over 90 frames: mean 0.002/255,
+0.0003% of pixels off by more than 16/255 (the odd pixel on a triangle's edge). The log
+(`sd:/skintest.txt`) has a self check: the batch executor against the interpreter, every
+program, to the bit, on Broadway itself ("67 of 67"). It also has the timings.
+
+### What it costs (Dolphin's emulated clock, not a Wii's)
+
+| | the interpreter | the batch executor |
+| --- | --- | --- |
+| program 10 (skinned, two point lights; 66 instructions), running it | 22.6 µs a vertex | 4.3 µs |
+| program 27 (one node; 24 instructions) | 8.6 µs | 1.3 µs |
+| a skinned character's draw, all of it (fetch, program, clip, GX) | 24.7 µs a vertex | 5.1 µs |
+
+GX submission and the projection fit are 2.6 ms of a frame of 9,632 vertices; the vertex
+programs are the rest (36.7 ms). The arithmetic is now most of it, about eight
+instructions per vertex per component. The next step is paired singles, which do two
+vertices per instruction (plan stage 7, "Speed"), measured with the same log. The numbers
+are Dolphin's: it counts instructions, not Broadway's latencies, so a real Wii will be
+slower. That is for the test on a Wii.
 
 ## Files
 
