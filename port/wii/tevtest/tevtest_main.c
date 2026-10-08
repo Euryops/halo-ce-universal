@@ -218,10 +218,6 @@ int main(int argc, char **argv)
 	if (video_mode->viTVMode & VI_NON_INTERLACE)
 		VIDEO_WaitVSync();
 	printf("\n\n  tevtest: translating %d pixel shaders\n", CORPUS_COUNT);
-#ifdef TEVTEST_STOP
-	for (;;)
-		VIDEO_WaitVSync();
-#endif
 
 	for (tile = 0; tile < CORPUS_COUNT; tile++)
 	{
@@ -254,11 +250,6 @@ int main(int argc, char **argv)
 	gxb_set_raster_state(&state);
 	for (frame = 0;; frame++)
 	{
-#ifdef TEVTEST_CLEAR
-		gxb_clear(0, 0, GXB_SCREEN_WIDTH, GXB_SCREEN_HEIGHT, 1, 1, 1, 0x40c040ffUL, 1.0f);
-		gxb_present();
-		continue;
-#endif
 		draw_sheet(textures, (frame / 90) & 1);
 		gxb_present();
 	}
