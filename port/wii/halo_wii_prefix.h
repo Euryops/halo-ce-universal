@@ -74,6 +74,8 @@ always runs and the handler is compiled out. */
 
 /* ---------- multiplayer session limits of the native builds */
 
+/* the Wii's pool sizes and fixed places, ahead of the native ones */
+#include "halo_wii_capacity.h"
 #include "halo_port_limits.h"
 
 /* the Xbox Winsock headers' fd_set in game units (platform units see glibc's,

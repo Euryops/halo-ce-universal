@@ -45,7 +45,12 @@ symbols in this file:
 #define GAME_STATE_BASE_ADDRESS HALO_PORT_GAME_STATE_BASE_ADDRESS
 #define GAME_STATE_SIZE HALO_PORT_GAME_STATE_SIZE
 #define GAME_STATE_VERIFY_SIZE HALO_PORT_GAME_STATE_CPU_SIZE
+#ifdef GEKKO
+/* the Wii's code is where the Xbox's tag cache was (port/wii/halo_wii_capacity.h) */
+#define TAG_CACHE_BASE_ADDRESS HALO_WII_TAG_CACHE_BASE_ADDRESS
+#else
 #define TAG_CACHE_BASE_ADDRESS 0x803A6000
+#endif
 /* the native builds' larger texture cache (halo_port_capacity.h) */
 #define TEXTURE_CACHE_SIZE HALO_PORT_TEXTURE_CACHE_SIZE
 #define SOUND_CACHE_SIZE 0x400000

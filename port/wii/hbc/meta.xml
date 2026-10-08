@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<app version="1">
+	<name>Halo: Combat Evolved</name>
+	<coder>halo-ce-universal Wii port</coder>
+	<version>stage 1</version>
+	<release_date>20261009</release_date>
+	<short_description>Halo CE from the decompilation</short_description>
+	<long_description>Halo: Combat Evolved built for the Wii from the halo-ce-universal decompilation.
+
+Stage 1: the engine boots on a stub platform layer and prints its start-up log. It does not load maps, draw or play yet.</long_description>
+</app>

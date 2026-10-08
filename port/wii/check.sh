@@ -6,7 +6,6 @@
 set -e
 cd "$(dirname "$0")/../.."
 mkdir -p build/ppc
-cp port/wii/halo_wii_prefix.h build/ppc/prefix.h
 cp port/wii/ppc-syntax-check.sh build/ppc/
 python3 - <<'PY'
 import json, pathlib
