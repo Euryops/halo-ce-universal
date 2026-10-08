@@ -72,10 +72,10 @@ short:
   Textures the game makes as it runs, in Xbox formats, are converted to RGBA8 tiles.
 - **Render state:** depth, blending, alpha test, culling, color writes, viewport and
   scissor, clears clipped to the viewport (split screen).
-- **Not yet:** the pixel shaders (each draw is texture 0 times the diffuse color: the
-  NV2A combiners to TEV is the next piece), render targets other than the back buffer
-  (shadows, water, screen effects are skipped and counted), visibility tests (all
-  visible), fog.
+- **Pixel shaders:** the NV2A's register combiners become TEV stages (below).
+- **Not yet:** render targets other than the back buffer (shadows, water, screen effects
+  are skipped and counted), visibility tests (all visible), cube maps and 3D textures
+  (sampled as their first face or slice), projected texture coordinates.
 
 The game's vertical blank callback, which its frame throttle waits on, runs at every
 blank from a thread above the game's (`gxb_set_vertical_blank_handler`).
@@ -89,7 +89,8 @@ the same reason as `wii_os.h`.
 
 With no maps the game cannot reach its menu, so `build.sh` also makes
 `build/wii/gxtest/sd/apps/halo-gxtest/boot.dol`, a scene (`gxtest/gxtest_scene.c`) that
-drives the device as the game does: the game's environment program (49) over a level of
+drives the device as the game does, with pixel shaders of the game's kind: the game's
+environment program (49) over a level of
 compressed BSP vertices with GX-format textures, the widget program (56) for a menu with
 Xbox-format textures made at run time, immediate mode, and checks for culling, the alpha
 test and clears. In Dolphin:
@@ -97,6 +98,51 @@ test and clears. In Dolphin:
     ~/euryo/scripts/dolphin/run.sh build/wii/gxtest/sd/apps/halo-gxtest/boot.dol 40 <outdir>
 
 and the last of `<outdir>/Dump/Frames/framedump_*.png` is the held frame.
+
+## Pixel shaders: the NV2A's combiners as TEV stages (stage 4, second part)
+
+`src/nv2a_tev.c` translates each draw's combiner state (the `D3DRS_PS*` render states) to
+up to 16 TEV stages, with the semantics of the Linux port's GLSL translation
+(`port/linux/src/nv2a_psh.c`); its opening comment says how. The device keeps each
+translation, keyed by the combiner state, the textures sampled, fog, and which constant
+channels are 0 or 255 (those are folded in: the game picks channels with constants such
+as `0x00ff0000`). The inputs are the two vertex colors, the four textures and the fog
+factor, which reaches TEV as a fifth texture (a ramp looked up at the vertex's factor).
+
+Of the game's 154 programs (`tests/psh_corpus.h`, transcribed from the rasterizer
+sources), 135 fit, with their own constants and fog on. A program that does not fit is
+not drawn, and the device logs it once: the environment's bump-mapped specular passes
+(point and spot lights, the specular lightmap: 40 to 50 stages of reflection-vector
+arithmetic), its dynamic diffuse light, the self-illuminated lightmap (33: its
+texture-by-texture dot product and animated multiplexers all fall to the alpha pipe), and
+a few screen effects, layered fog and the HUD's reverse-subtract screen geometry.
+
+### Checking it
+
+    ./port/wii/tests/run.sh
+
+runs `tests/tev_test.c`: every corpus program and 3000 random ones through an NV2A
+reference (floats) and a model of TEV's integer arithmetic as Dolphin computes it
+(`tests/tev_models.h`), on random texels, colors, constants and fog. It fails when a
+corpus program is off by more than 6/255 on more than 1% of inputs; random programs are
+only reported (some flip a multiplexer at exactly 0.5, or pass TEV's ±4 range mid-sum).
+`tev_test -v N` prints corpus program N's stages, `tev_test -s SEED` a random one's.
+
+In Dolphin, `build.sh` makes `build/wii/tevtest/sd/apps/halo-tevtest/boot.dol`, the
+shader sheet (`tevtest/`): each corpus program on a tile of its own, drawn by the GX
+backend with known textures, colors and fog (magenta: not translated), its rgb for a
+second and a half and then its alpha as gray. Check it pixel by pixel against the NV2A
+reference:
+
+    DOLPHIN_FRAME_DUMP_RAW=1 ~/euryo/scripts/dolphin/run.sh \
+        build/wii/tevtest/sd/apps/halo-tevtest/boot.dol 15 <outdir>
+    cc -std=c99 -O2 -Iport/wii/src -Iport/wii/tests -Iport/wii/tevtest -o tev_sheet_expect \
+        port/wii/tevtest/tev_sheet_expect.c port/wii/src/nv2a_tev.c -lm
+    ./tev_sheet_expect <folder> && python3 port/wii/tevtest/check.py <outdir>/Dump/Frames <folder> sheet.png
+
+`check.py` prints each tile's worst and mean difference from the NV2A's and from the TEV
+model's, and writes `sheet.png`: Dolphin's sheet, the reference, and their difference
+eight times over.
 
 ## Files
 

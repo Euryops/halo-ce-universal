@@ -22,6 +22,7 @@ frame buffer (wii_main.c), which comes back when the game halts.
 #include <gccore.h>
 
 #include "gx_backend.h"
+#include "nv2a_tev.h"
 
 /* wii_main.c */
 void *wii_video_mode(void);
@@ -43,6 +44,14 @@ static struct
 	int scissor[4];
 	enum gxb_combine combine;
 	int texcoord_count;
+	/* the game's pixel shader, while it is what draws (else the combine) */
+	int program_active;
+	struct nv2a_tev_program program;
+	uint8_t konst[4][4], initial_color[4][4], initial_alpha[4][4];
+	/* what each vertex carries for it */
+	int specular, fog;
+	/* the fog factor's ramp: texel n is n */
+	void *fog_ramp;
 	struct gxb_projection projection;
 	int projection_valid;
 } gx;
@@ -100,14 +109,32 @@ void gxb_initialize(void)
 	GX_SetPixelFmt(gx.mode->aa ? GX_PF_RGB565_Z16 : GX_PF_RGB8_Z24, GX_ZC_LINEAR);
 	GX_SetDispCopyGamma(GX_GM_1_0);
 
-	/* one color channel, from the vertex; no lighting */
-	GX_SetNumChans(1);
+	/* two color channels, the diffuse and the specular, from the vertex; no
+	lighting */
+	GX_SetNumChans(2);
 	GX_SetChanCtrl(GX_COLOR0A0, GX_DISABLE, GX_SRC_REG, GX_SRC_VTX, GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE);
+	GX_SetChanCtrl(GX_COLOR1A1, GX_DISABLE, GX_SRC_REG, GX_SRC_VTX, GX_LIGHTNULL, GX_DF_NONE, GX_AF_NONE);
 	GX_ClearVtxDesc();
 	GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
 	GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
+	GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR1, GX_CLR_RGBA, GX_RGBA8, 0);
 	for (index = 0; index < GXB_MAXIMUM_TEXTURES; index++)
 		GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_TEX0 + index, GX_TEX_ST, GX_F32, 0);
+	GX_SetVtxAttrFmt(GX_VTXFMT0, GX_VA_TEX0 + NV2A_TEV_FOG_TEXTURE, GX_TEX_S, GX_F32, 0);
+	/* the fog ramp, 256 by 4 in I8's 8 by 4 tiles: each texel's value is its
+	column, so that a lookup at (f * 255 + 1/2) / 256 gives back f, in alpha
+	as in color */
+	{
+		unsigned char *ramp = memalign(32, 256 * 4);
+		int tile, row, column;
+
+		for (tile = 0; tile < 32; tile++)
+			for (row = 0; row < 4; row++)
+				for (column = 0; column < 8; column++)
+					ramp[tile * 32 + row * 8 + column] = (unsigned char)(tile * 8 + column);
+		DCFlushRange(ramp, 256 * 4);
+		gx.fog_ramp = ramp;
+	}
 	/* (by hand: libogc's guMtxIdentity is in the unit of its paired-single
 	matrix code, whose small-data constants the game's link misaligns) */
 	memset(identity, 0, sizeof(identity));
@@ -222,11 +249,15 @@ void gxb_set_combine(enum gxb_combine combine, int texcoord_count)
 
 	gx.combine = combine;
 	gx.texcoord_count = texcoord_count;
+	gx.program_active = 0;
+	gx.specular = gx.fog = 0;
 	if (!gx.ready)
 		return;
 	GX_ClearVtxDesc();
 	GX_SetVtxDesc(GX_VA_POS, GX_DIRECT);
 	GX_SetVtxDesc(GX_VA_CLR0, GX_DIRECT);
+	GX_SetTevSwapModeTable(GX_TEV_SWAP0, GX_CH_RED, GX_CH_GREEN, GX_CH_BLUE, GX_CH_ALPHA);
+	GX_SetTevSwapMode(GX_TEVSTAGE0, GX_TEV_SWAP0, GX_TEV_SWAP0);
 	for (index = 0; index < texcoord_count; index++)
 	{
 		GX_SetVtxDesc(GX_VA_TEX0 + index, GX_DIRECT);
@@ -243,6 +274,105 @@ void gxb_set_combine(enum gxb_combine combine, int texcoord_count)
 	{
 		GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
 		GX_SetTevOp(GX_TEVSTAGE0, combine == _gxb_combine_modulate ? GX_MODULATE : GX_REPLACE);
+	}
+}
+
+void gxb_set_program(const struct nv2a_tev_program *program, const uint8_t konst[4][4],
+	const uint8_t initial_color[4][4], const uint8_t initial_alpha[4][4])
+{
+	int index, stage, texcoords = 0;
+
+	if (program != &gx.program)
+	{
+		gx.program = *program;
+		memcpy(gx.konst, konst, sizeof(gx.konst));
+		memcpy(gx.initial_color, initial_color, sizeof(gx.initial_color));
+		memcpy(gx.initial_alpha, initial_alpha, sizeof(gx.initial_alpha));
+	}
+	gx.program_active = 1;
+	gx.specular = gx.fog = 0;
+	for (stage = 0; stage < program->stage_count; stage++)
+	{
+		const struct nv2a_tev_stage *s = &program->stages[stage];
+
+		if (s->texture != 0xff && s->texture < GXB_MAXIMUM_TEXTURES && s->texture + 1 > texcoords)
+			texcoords = s->texture + 1;
+		if (s->texture == NV2A_TEV_FOG_TEXTURE)
+			gx.fog = 1;
+		if (s->color == 1)
+			gx.specular = 1;
+	}
+	gx.texcoord_count = texcoords;
+	if (!gx.ready)
+		return;
+
+	/* what each vertex carries: the colors, texture coordinates 0 to the
+	last sampled, the fog factor */
+	GX_ClearVtxDesc();
+	GX_SetVtxDesc(GX_VA_POS, GX_DIRECT);
+	GX_SetVtxDesc(GX_VA_CLR0, GX_DIRECT);
+	if (gx.specular)
+		GX_SetVtxDesc(GX_VA_CLR1, GX_DIRECT);
+	for (index = 0; index < texcoords; index++)
+	{
+		GX_SetVtxDesc(GX_VA_TEX0 + index, GX_DIRECT);
+		GX_SetTexCoordGen(GX_TEXCOORD0 + index, GX_TG_MTX2x4, GX_TG_TEX0 + index, GX_IDENTITY);
+	}
+	if (gx.fog)
+	{
+		GXTexObj ramp;
+
+		GX_SetVtxDesc(GX_VA_TEX0 + NV2A_TEV_FOG_TEXTURE, GX_DIRECT);
+		GX_SetTexCoordGen(GX_TEXCOORD0 + NV2A_TEV_FOG_TEXTURE, GX_TG_MTX2x4, GX_TG_TEX0 + NV2A_TEV_FOG_TEXTURE,
+			GX_IDENTITY);
+		/* texture coordinates below 4 that nothing samples are still made
+		(the fog's is the fifth) */
+		for (index = texcoords; index < NV2A_TEV_FOG_TEXTURE; index++)
+		{
+			GX_SetVtxDesc(GX_VA_TEX0 + index, GX_DIRECT);
+			GX_SetTexCoordGen(GX_TEXCOORD0 + index, GX_TG_MTX2x4, GX_TG_TEX0 + index, GX_IDENTITY);
+		}
+		gx.texcoord_count = NV2A_TEV_FOG_TEXTURE;
+		GX_InitTexObj(&ramp, gx.fog_ramp, 256, 4, GX_TF_I8, GX_CLAMP, GX_CLAMP, GX_FALSE);
+		GX_InitTexObjLOD(&ramp, GX_LINEAR, GX_LINEAR, 0.0f, 0.0f, 0.0f, GX_FALSE, GX_FALSE, GX_ANISO_1);
+		GX_LoadTexObj(&ramp, GX_TEXMAP0 + NV2A_TEV_FOG_TEXTURE);
+	}
+	GX_SetNumTexGens(gx.fog ? NV2A_TEV_FOG_TEXTURE + 1 : texcoords);
+
+	for (index = 0; index < 4; index++)
+	{
+		GX_SetTevSwapModeTable(GX_TEV_SWAP0 + index, program->swap_tables[index][0], program->swap_tables[index][1],
+			program->swap_tables[index][2], program->swap_tables[index][3]);
+		GX_SetTevKColor(GX_KCOLOR0 + index, (GXColor){ gx.konst[index][0], gx.konst[index][1], gx.konst[index][2],
+			gx.konst[index][3] });
+	}
+	/* the registers' starting values (PREV is register 0 in the program's
+	numbering, as GX's) */
+	for (index = 0; index < 4; index++)
+	{
+		if (program->initial_color[index].source || program->initial_alpha[index].source)
+		{
+			GX_SetTevColor(GX_TEVPREV + index, (GXColor){ gx.initial_color[index][0], gx.initial_color[index][1],
+				gx.initial_color[index][2], gx.initial_alpha[index][3] });
+		}
+	}
+	GX_SetNumTevStages(program->stage_count);
+	for (stage = 0; stage < program->stage_count; stage++)
+	{
+		const struct nv2a_tev_stage *s = &program->stages[stage];
+		u8 tev = GX_TEVSTAGE0 + stage;
+
+		GX_SetTevOrder(tev, s->texture == 0xff ? GX_TEXCOORDNULL : GX_TEXCOORD0 + s->texture,
+			s->texture == 0xff ? GX_TEXMAP_NULL : GX_TEXMAP0 + s->texture,
+			s->color == 0xff ? GX_COLORNULL : s->color ? GX_COLOR1A1 : GX_COLOR0A0);
+		GX_SetTevSwapMode(tev, s->color_swap, s->texture_swap);
+		GX_SetTevKColorSel(tev, s->konst_color);
+		GX_SetTevKAlphaSel(tev, s->konst_alpha);
+		GX_SetTevColorIn(tev, s->rgb.a, s->rgb.b, s->rgb.c, s->rgb.d);
+		GX_SetTevColorOp(tev, s->rgb.op, s->rgb.bias, s->rgb.scale, s->rgb.clamp ? GX_TRUE : GX_FALSE, s->rgb.dest);
+		GX_SetTevAlphaIn(tev, s->alpha.a, s->alpha.b, s->alpha.c, s->alpha.d);
+		GX_SetTevAlphaOp(tev, s->alpha.op, s->alpha.bias, s->alpha.scale, s->alpha.clamp ? GX_TRUE : GX_FALSE,
+			s->alpha.dest);
 	}
 }
 
@@ -297,8 +427,16 @@ static void emit(const struct gxb_vertex *vertex, int texcoord_count)
 
 	GX_Position3f32(vertex->position[0], vertex->position[1], vertex->position[2]);
 	GX_Color1u32(vertex->color);
+	if (gx.specular)
+		GX_Color1u32(vertex->specular);
 	for (index = 0; index < texcoord_count; index++)
 		GX_TexCoord2f32(vertex->texcoords[index][0], vertex->texcoords[index][1]);
+	if (gx.fog)
+	{
+		float fog = vertex->fog < 0.0f ? 0.0f : vertex->fog > 1.0f ? 1.0f : vertex->fog;
+
+		GX_TexCoord1f32((fog * 255.0f + 0.5f) / 256.0f);
+	}
 }
 
 void gxb_draw(enum gxb_primitive primitive, const struct gxb_projection *projection,
@@ -333,7 +471,7 @@ void gxb_clear(int x0, int y0, int x1, int y1, int color, int alpha, int depth, 
 {
 	struct gxb_raster_state saved_raster = gx.raster, clear = { 0 };
 	enum gxb_combine saved_combine = gx.combine;
-	int saved_texcoords = gx.texcoord_count;
+	int saved_texcoords = gx.texcoord_count, saved_program = gx.program_active;
 	float saved_viewport[6];
 	struct gxb_projection orthographic = { 0, 0.0f, 0.0f };
 	struct gxb_vertex corners[4];
@@ -370,12 +508,22 @@ void gxb_clear(int x0, int y0, int x1, int y1, int color, int alpha, int depth, 
 	gxb_draw(_gxb_quads, &orthographic, corners, NULL, 4);
 
 	gxb_set_raster_state(&saved_raster);
-	gxb_set_combine(saved_combine, saved_texcoords);
+	if (saved_program)
+		gxb_set_program(&gx.program, gx.konst, gx.initial_color, gx.initial_alpha);
+	else
+		gxb_set_combine(saved_combine, saved_texcoords);
 	gxb_set_viewport(saved_viewport[0], saved_viewport[1], saved_viewport[2], saved_viewport[3],
 		saved_viewport[4], saved_viewport[5]);
 }
 
 /* ---------- presentation */
+
+void gxb_set_display_filter(int filter)
+{
+	if (!gx.ready)
+		return;
+	GX_SetCopyFilter(gx.mode->aa, gx.mode->sample_pattern, filter ? GX_TRUE : GX_FALSE, gx.mode->vfilter);
+}
 
 void gxb_present(void)
 {

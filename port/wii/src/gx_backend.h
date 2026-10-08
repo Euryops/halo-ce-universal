@@ -27,9 +27,11 @@ perspective-correct interpolation from that (gx_projection says how).
 struct gxb_vertex
 {
 	float position[3];
-	/* RGBA, red in the top byte */
-	uint32_t color;
+	/* the diffuse and specular colors, RGBA, red in the top byte */
+	uint32_t color, specular;
 	float texcoords[GXB_MAXIMUM_TEXTURES][2];
+	/* the fog factor, 0 (all fog) to 1 */
+	float fog;
 };
 
 enum gxb_primitive
@@ -81,7 +83,10 @@ struct gxb_texture
 	uint8_t linear;
 };
 
-/* how the texture and the vertex color are combined (TEV) */
+struct nv2a_tev_program;
+
+/* how the texture and the vertex color are combined (TEV), for what has no
+pixel shader of the game's (the clears) */
 enum gxb_combine
 {
 	/* the vertex color */
@@ -103,6 +108,13 @@ void gxb_set_raster_state(const struct gxb_raster_state *state);
 /* textures[0..count), NULL entries unbound */
 void gxb_set_textures(const struct gxb_texture *textures, int count);
 void gxb_set_combine(enum gxb_combine combine, int texcoord_count);
+/* the game's pixel shader as TEV stages (nv2a_tev.h), with the values of its
+constant registers and its registers' starting values (RGBA, as
+nv2a_tev_constant_value gives them; the starting values only where the
+program names them). Texture stage n of the program samples GX_TEXMAPn
+with the vertices' texture coordinates n; the fog factor's ramp is its own */
+void gxb_set_program(const struct nv2a_tev_program *program, const uint8_t konst[4][4],
+	const uint8_t initial_color[4][4], const uint8_t initial_alpha[4][4]);
 
 /* a draw: with indices, the vertices are vertices[indices[0..count)], else
 vertices[0..count) */
@@ -112,6 +124,11 @@ void gxb_draw(enum gxb_primitive primitive, const struct gxb_projection *project
 /* fills the rectangle (in screen pixels, the right and bottom edges
 excluded) with the color (RGBA) and depth (0..1) where asked */
 void gxb_clear(int x0, int y0, int x1, int y1, int color, int alpha, int depth, uint32_t rgba, float z);
+
+/* whether the copy to the screen filters vertically against an interlaced
+TV's flicker (it does from the start; the shader sheet turns it off, to be
+compared pixel by pixel) */
+void gxb_set_display_filter(int filter);
 
 /* the picture so far to the screen, at the next vertical blank */
 void gxb_present(void);

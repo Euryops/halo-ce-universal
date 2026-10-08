@@ -74,11 +74,15 @@ for f in port/wii/src/wii_crt.c port/wii/src/wii_xbox.c port/wii/src/d3d8_gx.c p
 done
 # wii_main.c and wii_os.c see libogc and not the XDK
 LIBOGC="$ABI -std=gnu11 -Wall -I$D/libogc/include"
+TEVTEST="$LIBOGC -Iport/wii/src -Iport/wii/tests -Iport/wii/tevtest"
+export TEVTEST
 compile port/wii/src/wii_main.c $B/platform/wii_main.o LIBOGC
 compile port/wii/src/wii_os.c $B/platform/wii_os.o LIBOGC
-# the GX device's libogc half, and the vertex programs' interpreter (plain C)
+# the GX device's libogc half, and the vertex programs' interpreter and the
+# pixel shaders' translation to TEV (plain C)
 compile port/wii/src/gx_backend.c $B/platform/gx_backend.o LIBOGC
 compile port/wii/src/nv2a_vsh_run.c $B/platform/nv2a_vsh_run.o LIBOGC
+compile port/wii/src/nv2a_tev.c $B/platform/nv2a_tev.o LIBOGC
 # the game's sin, pow and the rest, the same on every port (port/include/halo_math.h)
 MUSL="$ABI -std=gnu11 -w -Iport/third_party/musl-math/include -include port/third_party/musl-math/include/libm.h"
 for f in port/third_party/musl-math/src/*.c; do compile "$f" "$B/musl/$(basename "$f" .c).o" MUSL; done
@@ -110,8 +114,18 @@ compile port/wii/gxtest/gxtest_scene.c $B/gxtest/gxtest_scene.o GXTEST
 compile port/wii/gxtest/gxtest_main.c $B/gxtest/gxtest_main.o LIBOGC
 $CC -mrvl -mcpu=750 -meabi -mhard-float $B/gxtest/gxtest_main.o $B/gxtest/gxtest_scene.o \
 	$B/platform/d3d8_gx.o $B/platform/d3d8_gx_resources.o $B/platform/gx_backend.o $B/platform/nv2a_vsh_run.o \
+	$B/platform/nv2a_tev.o \
 	-L$D/libogc/lib/wii -logc -lm -o $B/gxtest/gxtest.elf
 $D/tools/bin/elf2dol $B/gxtest/gxtest.elf $B/gxtest/sd/apps/halo-gxtest/boot.dol
+
+echo "==> shader sheet"
+# tevtest.dol: the game's pixel shaders as TEV stages, a tile each, for
+# Dolphin's frame dumps to be checked against (tevtest/tev_sheet.h)
+mkdir -p $B/tevtest/sd/apps/halo-tevtest
+compile port/wii/tevtest/tevtest_main.c $B/tevtest/tevtest_main.o TEVTEST
+$CC -mrvl -mcpu=750 -meabi -mhard-float $B/tevtest/tevtest_main.o $B/platform/gx_backend.o $B/platform/nv2a_tev.o \
+	-L$D/libogc/lib/wii -logc -lm -o $B/tevtest/tevtest.elf
+$D/tools/bin/elf2dol $B/tevtest/tevtest.elf $B/tevtest/sd/apps/halo-tevtest/boot.dol
 
 echo "==> Homebrew Channel folder"
 cp port/wii/hbc/meta.xml port/wii/hbc/icon.png $B/sd/apps/halo/

@@ -27,6 +27,10 @@ gives them:
   counter-clockwise culling (only the clockwise one may show), a cleared
   rectangle, and the icon drawn with the alpha test.
 
+Each draw sets a pixel shader of the game's kind (set_pixel_shader), which
+the device translates to TEV; the game's own programs are drawn on
+tevtest.dol's sheet.
+
 The camera turns for a few seconds and the scene then holds its last frame.
 */
 
@@ -585,6 +589,53 @@ static void set_camera(float eye_x, float eye_y, float eye_z)
 	IDirect3DDevice8_SetVertexShaderConstant(device, -96, matrix, 4);
 }
 
+/* the game's pixel shaders for these draws: a texture alone, as
+rasterizer_xbox.c sets one where it only copies a texture (texture stage 0
+to the final combiner's D), and the widgets' texture by the vertex color,
+or the color alone */
+enum
+{
+	_shader_texture,
+	_shader_modulate,
+	_shader_color,
+};
+
+static void set_pixel_shader(int shader)
+{
+	D3DPIXELSHADERDEF definition;
+
+	memset(&definition, 0, sizeof(definition));
+	definition.PSCombinerCount = 1;
+	switch (shader)
+	{
+	case _shader_texture:
+		definition.PSTextureModes = PS_TEXTUREMODES(PS_TEXTUREMODES_PROJECT2D, 0, 0, 0);
+		definition.PSFinalCombinerInputsABCD = PS_COMBINERINPUTS(0, 0, 0, PS_REGISTER_T0);
+		break;
+	case _shader_modulate:
+		/* r0.a = t0.a * v0.a; rgb = t0 * v0, alpha r0.a */
+		definition.PSTextureModes = PS_TEXTUREMODES(PS_TEXTUREMODES_PROJECT2D, 0, 0, 0);
+		definition.PSAlphaInputs[0] = PS_COMBINERINPUTS(PS_REGISTER_T0 | PS_CHANNEL_ALPHA,
+			PS_REGISTER_V0 | PS_CHANNEL_ALPHA, 0, 0);
+		definition.PSAlphaOutputs[0] = PS_COMBINEROUTPUTS(PS_REGISTER_R0, PS_REGISTER_DISCARD, PS_REGISTER_DISCARD, 0);
+		definition.PSFinalCombinerInputsABCD = PS_COMBINERINPUTS(PS_REGISTER_T0, PS_REGISTER_V0, 0, 0);
+		definition.PSFinalCombinerInputsEFG = PS_COMBINERINPUTS(0, 0, PS_REGISTER_R0 | PS_CHANNEL_ALPHA, 0);
+		break;
+	default:
+		definition.PSFinalCombinerInputsABCD = PS_COMBINERINPUTS(0, 0, 0, PS_REGISTER_V0);
+		definition.PSFinalCombinerInputsEFG = PS_COMBINERINPUTS(0, 0, PS_REGISTER_V0 | PS_CHANNEL_ALPHA, 0);
+		break;
+	}
+	IDirect3DDevice8_SetPixelShaderProgram(device, &definition);
+}
+
+/* a widget's texture, and the shader that goes with it */
+static void set_widget_texture(D3DBaseTexture *texture)
+{
+	IDirect3DDevice8_SetTexture(device, 0, texture);
+	set_pixel_shader(texture ? _shader_modulate : _shader_color);
+}
+
 static void draw_level(D3DBaseTexture *ground, D3DTexture *bricks, float angle)
 {
 	IDirect3DDevice8_SetRenderState(device, D3DRS_ZENABLE, D3DZB_TRUE);
@@ -594,6 +645,7 @@ static void draw_level(D3DBaseTexture *ground, D3DTexture *bricks, float angle)
 	IDirect3DDevice8_SetRenderState(device, D3DRS_ALPHATESTENABLE, FALSE);
 	IDirect3DDevice8_SetRenderState(device, D3DRS_CULLMODE, D3DCULL_CCW);
 	IDirect3DDevice8_SetVertexShader(device, environment_shader);
+	set_pixel_shader(_shader_texture);
 	set_camera(22.0f * cosf(angle), 9.0f, 22.0f * sinf(angle));
 	/* rasterizer_xbox_environment.c's texture transform: u and v as they are */
 	set_constant(-84, 1.0f, 1.0f, 0.0f, 0.0f);
@@ -680,7 +732,7 @@ static void text_row(D3DTexture *text, int row, float x, float y, float scale, D
 	float v0 = (float)(row * TEXT_ROW_HEIGHT) / (TEXT_ROW_HEIGHT * TEXT_ROWS);
 	float v1 = (float)((row + 1) * TEXT_ROW_HEIGHT) / (TEXT_ROW_HEIGHT * TEXT_ROWS);
 
-	IDirect3DDevice8_SetTexture(device, 0, (D3DBaseTexture *)text);
+	set_widget_texture((D3DBaseTexture *)text);
 	widget_quad(x, y, x + TEXT_WIDTH * scale, y + TEXT_ROW_HEIGHT * scale, 0.0f, v0, 1.0f, v1, top, bottom);
 }
 
@@ -691,7 +743,7 @@ static void draw_menu(D3DTexture *text, D3DTexture *icon, int selected)
 	set_widget_state();
 	IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_MAGFILTER, D3DTEXF_POINT);
 	/* the panel, untextured */
-	IDirect3DDevice8_SetTexture(device, 0, NULL);
+	set_widget_texture(NULL);
 	widget_quad(40, 36, 600, 108, 0, 0, 0, 0, 0xb0000000UL, 0x60000000UL);
 	widget_quad(40, 300, 420, 452, 0, 0, 0, 0, 0xa0101820UL, 0xa0101820UL);
 	/* the title */
@@ -701,10 +753,10 @@ static void draw_menu(D3DTexture *text, D3DTexture *icon, int selected)
 	{
 		float y = 312.0f + index * 46.0f;
 
-		IDirect3DDevice8_SetTexture(device, 0, NULL);
+		set_widget_texture(NULL);
 		if (index == selected)
 			immediate_quad(48, y - 4, 412, y + 38, 0x803080ffUL);
-		IDirect3DDevice8_SetTexture(device, 0, (D3DBaseTexture *)icon);
+		set_widget_texture((D3DBaseTexture *)icon);
 		IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_MAGFILTER, D3DTEXF_LINEAR);
 		immediate_quad(54, y, 88, y + 34, 0xffffffffUL);
 		IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_MAGFILTER, D3DTEXF_POINT);
@@ -729,7 +781,7 @@ static void draw_checks(D3DTexture *icon)
 
 	set_widget_state();
 	IDirect3DDevice8_SetRenderState(device, D3DRS_CULLMODE, D3DCULL_CCW);
-	IDirect3DDevice8_SetTexture(device, 0, NULL);
+	set_widget_texture(NULL);
 	D3DVertexBuffer_Lock(widget_vertices, 0, 0, &data, 0);
 	vertices = (struct widget_vertex *)data;
 	memcpy(vertices, triangles, sizeof(triangles));
@@ -742,7 +794,7 @@ static void draw_checks(D3DTexture *icon)
 	IDirect3DDevice8_SetRenderState(device, D3DRS_ALPHATESTENABLE, TRUE);
 	IDirect3DDevice8_SetRenderState(device, D3DRS_ALPHAFUNC, D3DCMP_GREATER);
 	IDirect3DDevice8_SetRenderState(device, D3DRS_ALPHAREF, 0x80);
-	IDirect3DDevice8_SetTexture(device, 0, (D3DBaseTexture *)icon);
+	set_widget_texture((D3DBaseTexture *)icon);
 	widget_quad(480, 372, 544, 436, 0, 0, 1, 1, 0xffffffffUL, 0xffffffffUL);
 	IDirect3DDevice8_SetRenderState(device, D3DRS_ALPHATESTENABLE, FALSE);
 

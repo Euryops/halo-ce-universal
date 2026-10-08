@@ -27,10 +27,12 @@ differs from the Linux port is where the work is done:
 - Textures in GX's formats (the maps' bitmaps, converted by
   port/wii/mapconv) are sampled where they lie; textures the game makes at
   run time in Xbox formats are converted (d3d8_gx_resources.c).
-- The pixel shader is not translated yet: each draw is texture 0 times the
-  diffuse color (or either alone), with the game's blending, alpha test,
-  depth and culling. The NV2A's register combiners map to TEV stages; that
-  is the next piece (the plan's stage 4, "NV2A combiners -> TEV").
+- The pixel shader, the NV2A's register combiners, is translated to TEV
+  stages (nv2a_tev.c), with the vertices' two colors, up to four textures
+  and the fog factor (a fifth texture, a ramp) as its inputs. A shader that
+  does not fit TEV's 16 stages (the environment's bump-mapped specular
+  passes) is not drawn. Cube maps and 3D textures are sampled as their first
+  face or slice, with the first two texture coordinates.
 - Only the back buffer is drawn into. Draws and clears into other targets
   (the shadow maps, the water's reflection, the screen effects' copies) are
   counted and skipped, so the effects that read them are missing.
@@ -39,6 +41,7 @@ differs from the Linux port is where the work is done:
 
 #include "d3d8_gx.h"
 #include "nv2a_vsh_run.h"
+#include "nv2a_tev.h"
 #include "halo_ui_pointer.h"
 
 #include <math.h>
@@ -72,8 +75,6 @@ struct vertex_shader_object
 	struct nv2a_vsh_program *program;
 	struct vertex_element elements[NV2A_VSH_ATTRIBUTE_COUNT];
 	unsigned long element_count;
-	/* the program writes oD0: without it, the texture is drawn alone */
-	BOOL writes_diffuse;
 };
 
 /* ---------- the device */
@@ -134,6 +135,9 @@ static struct
 	unsigned long draws, vertices, clears, skipped_target, skipped_program, skipped_fvf;
 	unsigned long perspective, orthographic, divided;
 	unsigned long textured, untextured_format;
+	/* draws with the game's pixel shader as TEV stages, and those whose
+	shader did not fit TEV (skipped) */
+	unsigned long shaded, skipped_shader;
 } stats;
 
 /* frames shown: a presented frame is counted at the vertical blank that
@@ -696,13 +700,6 @@ HRESULT WINAPI D3DDevice_CreateVertexShader(CONST DWORD *declaration, CONST DWOR
 			free(object->program);
 			object->program = NULL;
 		}
-		for (index = 0; object->program && index < object->program->count; index++)
-		{
-			const struct nv2a_vsh_instruction *instruction = &object->program->instructions[index];
-
-			if (instruction->output_mask && instruction->output_is_register && instruction->output_address == 3)
-				object->writes_diffuse = TRUE;
-		}
 	}
 	parse_declaration(object, declaration);
 	/* odd values are FVF codes; programmable shader handles are even */
@@ -777,15 +774,6 @@ static const struct nv2a_vsh_program *current_program(void)
 	if (!program)
 		program = device.vertex_shader;
 	return program ? program->program : NULL;
-}
-
-static BOOL current_writes_diffuse(void)
-{
-	struct vertex_shader_object *program = device.program_slots[device.program_address];
-
-	if (!program)
-		program = device.vertex_shader;
-	return program && program->writes_diffuse;
 }
 
 /* ---------- per-draw state */
@@ -872,33 +860,174 @@ static unsigned char gx_wrap(DWORD mode)
 	}
 }
 
-/* texture 0, if one is set and can be sampled; the number of texture
-coordinates the draw hands GX */
-static int apply_textures(void)
+/* ---------- the pixel shader
+
+The game's pixel shader is the combiner state in D3D__RenderState (the PS*
+render states, which SetPixelShaderProgram fills), and it is translated
+to TEV stages by nv2a_tev.c. A translation depends on the combiner state,
+on which textures are sampled, on fog, and on which constant channels are 0
+or 255 (nv2a_tev_constant_classes); each is made once and kept. */
+
+#define SHADER_CACHE_SIZE 256
+/* the combiner state, the sampled textures and fog, the constant classes */
+#define SHADER_KEY_WORDS (sizeof(struct nv2a_combiners) / 4 + 1 + 5)
+
+struct shader_entry
 {
-	struct gxb_texture texture;
-	int texcoords = 0;
+	BOOL used, translated;
+	uint32_t key[SHADER_KEY_WORDS];
+	struct nv2a_tev_program program;
+};
 
-	memset(&texture, 0, sizeof(texture));
-	if (device.textures[0] && gx_texture_get(device.textures[0], device.palettes[0], &texture))
+static struct shader_entry shader_cache[SHADER_CACHE_SIZE];
+
+static const struct nv2a_tev_program *shader_get(const struct nv2a_combiners *combiners,
+	const struct nv2a_tev_options *options)
+{
+	uint32_t key[SHADER_KEY_WORDS], hash = 2166136261u;
+	struct shader_entry *entry;
+	unsigned long index, probe;
+	const char *failure;
+
+	memset(key, 0, sizeof(key));
+	memcpy(key, combiners, sizeof(*combiners));
+	key[sizeof(*combiners) / 4] = options->textures_sampled | ((uint32_t)options->fog << 8);
+	nv2a_tev_constant_classes(options, key + sizeof(*combiners) / 4 + 1);
+	for (index = 0; index < SHADER_KEY_WORDS; index++)
+		hash = (hash ^ key[index]) * 16777619u;
+	for (probe = 0; probe < 8; probe++)
 	{
-		BOOL power_of_two = !(texture.width & (texture.width - 1)) && !(texture.height & (texture.height - 1));
+		entry = &shader_cache[(hash + probe) % SHADER_CACHE_SIZE];
+		if (!entry->used || !memcmp(entry->key, key, sizeof(key)))
+			break;
+	}
+	/* (a full neighbourhood: the first is made again) */
+	if (probe == 8)
+		entry = &shader_cache[hash % SHADER_CACHE_SIZE];
+	if (!entry->used || memcmp(entry->key, key, sizeof(key)))
+	{
+		entry->used = TRUE;
+		memcpy(entry->key, key, sizeof(key));
+		entry->translated = nv2a_tev_compile(combiners, options, &entry->program, &failure);
+		if (!entry->translated)
+		{
+			platform_log("Direct3D: pixel shader (combiners %08lx, textures %08lx, final %08lx %08lx) not drawn: %s",
+				(unsigned long)combiners->combiner_count, (unsigned long)combiners->texture_modes,
+				(unsigned long)combiners->final_inputs_abcd, (unsigned long)combiners->final_inputs_efg, failure);
+		}
+	}
+	return entry->translated ? &entry->program : NULL;
+}
 
-		/* GX repeats only textures whose sides are powers of two */
-		texture.wrap_s = power_of_two ? gx_wrap(D3D__TextureState[0][D3DTSS_ADDRESSU]) : 0;
-		texture.wrap_t = power_of_two ? gx_wrap(D3D__TextureState[0][D3DTSS_ADDRESSV]) : 0;
-		texture.linear = D3D__TextureState[0][D3DTSS_MAGFILTER] != D3DTEXF_POINT;
-		gxb_set_textures(&texture, 1);
-		texcoords = 1;
+/* a texture stage's texture, as GX samples it */
+static BOOL stage_texture(int stage, struct gxb_texture *texture)
+{
+	BOOL power_of_two;
+
+	memset(texture, 0, sizeof(*texture));
+	if (!device.textures[stage] || !gx_texture_get(device.textures[stage], device.palettes[stage], texture))
+	{
+		if (device.textures[stage])
+			stats.untextured_format++;
+		return FALSE;
+	}
+	power_of_two = !(texture->width & (texture->width - 1)) && !(texture->height & (texture->height - 1));
+	/* GX repeats only textures whose sides are powers of two */
+	texture->wrap_s = power_of_two ? gx_wrap(D3D__TextureState[stage][D3DTSS_ADDRESSU]) : 0;
+	texture->wrap_t = power_of_two ? gx_wrap(D3D__TextureState[stage][D3DTSS_ADDRESSV]) : 0;
+	texture->linear = D3D__TextureState[stage][D3DTSS_MAGFILTER] != D3DTEXF_POINT;
+	return TRUE;
+}
+
+/* the textures the shader samples, and the shader as TEV stages; FALSE
+when the shader does not fit TEV (the draw is then skipped) */
+static BOOL apply_pixel_shader(void)
+{
+	const DWORD *rs = D3D__RenderState;
+	struct gxb_texture textures[GXB_MAXIMUM_TEXTURES];
+	struct nv2a_combiners combiners;
+	struct nv2a_tev_options options;
+	const struct nv2a_tev_program *program;
+	uint8_t konst[4][4], initial_color[4][4], initial_alpha[4][4];
+	uint32_t c0[8], c1[8];
+	int stage, index;
+
+	memset(&options, 0, sizeof(options));
+	for (stage = 0; stage < GXB_MAXIMUM_TEXTURES; stage++)
+	{
+		if (((rs[D3DRS_PSTEXTUREMODES] >> (5 * stage)) & 0x1f) && stage_texture(stage, &textures[stage]))
+			options.textures_sampled |= (uint8_t)(1 << stage);
+		else
+			memset(&textures[stage], 0, sizeof(textures[stage]));
+	}
+	if (options.textures_sampled)
 		stats.textured++;
-	}
-	else if (device.textures[0])
+	gxb_set_textures(textures, GXB_MAXIMUM_TEXTURES);
+
+	memset(&combiners, 0, sizeof(combiners));
+	for (index = 0; index < 8; index++)
 	{
-		stats.untextured_format++;
+		combiners.rgb_inputs[index] = rs[D3DRS_PSRGBINPUTS0 + index];
+		combiners.rgb_outputs[index] = rs[D3DRS_PSRGBOUTPUTS0 + index];
+		combiners.alpha_inputs[index] = rs[D3DRS_PSALPHAINPUTS0 + index];
+		combiners.alpha_outputs[index] = rs[D3DRS_PSALPHAOUTPUTS0 + index];
+		c0[index] = options.c0[index] = rs[D3DRS_PSCONSTANT0_0 + index];
+		c1[index] = options.c1[index] = rs[D3DRS_PSCONSTANT1_0 + index];
 	}
-	gxb_set_combine(!texcoords ? _gxb_combine_color :
-		current_writes_diffuse() ? _gxb_combine_modulate : _gxb_combine_texture, texcoords);
-	return texcoords;
+	combiners.final_inputs_abcd = rs[D3DRS_PSFINALCOMBINERINPUTSABCD];
+	combiners.final_inputs_efg = rs[D3DRS_PSFINALCOMBINERINPUTSEFG];
+	combiners.combiner_count = rs[D3DRS_PSCOMBINERCOUNT];
+	combiners.texture_modes = rs[D3DRS_PSTEXTUREMODES];
+	options.final_c0 = rs[D3DRS_PSFINALCOMBINERCONSTANT0];
+	options.final_c1 = rs[D3DRS_PSFINALCOMBINERCONSTANT1];
+	options.fog = rs[D3DRS_FOGENABLE] != 0;
+	program = shader_get(&combiners, &options);
+	if (!program)
+	{
+		stats.skipped_shader++;
+		return FALSE;
+	}
+	memset(initial_color, 0, sizeof(initial_color));
+	memset(initial_alpha, 0, sizeof(initial_alpha));
+	for (index = 0; index < 4; index++)
+	{
+		nv2a_tev_constant_value(&program->konst[index], c0, c1, options.final_c0, options.final_c1,
+			rs[D3DRS_FOGCOLOR], konst[index]);
+		if (program->initial_color[index].source)
+		{
+			nv2a_tev_constant_value(&program->initial_color[index], c0, c1, options.final_c0, options.final_c1,
+				rs[D3DRS_FOGCOLOR], initial_color[index]);
+		}
+		if (program->initial_alpha[index].source)
+		{
+			nv2a_tev_constant_value(&program->initial_alpha[index], c0, c1, options.final_c0, options.final_c1,
+				rs[D3DRS_FOGCOLOR], initial_alpha[index]);
+		}
+	}
+	gxb_set_program(program, (const uint8_t (*)[4])konst, (const uint8_t (*)[4])initial_color,
+		(const uint8_t (*)[4])initial_alpha);
+	stats.shaded++;
+	return TRUE;
+}
+
+/* the fog factor for a vertex's oFog, by the fog table mode (the NV2A
+computes it for each pixel; here it is for each vertex) */
+static float fog_factor(float fog)
+{
+	const DWORD *rs = D3D__RenderState;
+	float density, start, end, factor;
+
+	memcpy(&density, &rs[D3DRS_FOGDENSITY], sizeof(density));
+	memcpy(&start, &rs[D3DRS_FOGSTART], sizeof(start));
+	memcpy(&end, &rs[D3DRS_FOGEND], sizeof(end));
+	switch (rs[D3DRS_FOGTABLEMODE])
+	{
+	case D3DFOG_EXP: factor = expf(-density * fog); break;
+	case D3DFOG_EXP2: factor = expf(-(density * fog) * (density * fog)); break;
+	case D3DFOG_LINEAR: factor = (end - fog) / (end - start > 1.0e-6f ? end - start : 1.0e-6f); break;
+	default: factor = fog; break;
+	}
+	return factor < 0.0f ? 0.0f : factor > 1.0f ? 1.0f : factor;
 }
 
 /* ---------- vertices */
@@ -1019,9 +1148,16 @@ static void clip_position(const struct nv2a_vsh_result *result, float clip[4])
 	}
 }
 
+/* the bytes of a color, red in the top byte, from a program's output */
+static uint32_t output_color(const float *value)
+{
+	return ((uint32_t)unit_to_byte(value[0]) << 24) | ((uint32_t)unit_to_byte(value[1]) << 16) |
+		((uint32_t)unit_to_byte(value[2]) << 8) | unit_to_byte(value[3]);
+}
+
 /* runs the program for one vertex's inputs, into the draw's vertex and
 clip position */
-static void transform_vertex(const struct nv2a_vsh_program *program, BOOL writes_diffuse, const float (*inputs)[4],
+static void transform_vertex(const struct nv2a_vsh_program *program, const float (*inputs)[4],
 	struct gxb_vertex *vertex, float clip[4])
 {
 	struct nv2a_vsh_result result;
@@ -1029,16 +1165,9 @@ static void transform_vertex(const struct nv2a_vsh_program *program, BOOL writes
 
 	nv2a_vsh_run(program, (const float (*)[4])device.constants, inputs, &result);
 	clip_position(&result, clip);
-	if (writes_diffuse)
-	{
-		vertex->color = ((uint32_t)unit_to_byte(result.diffuse[0]) << 24) |
-			((uint32_t)unit_to_byte(result.diffuse[1]) << 16) |
-			((uint32_t)unit_to_byte(result.diffuse[2]) << 8) | unit_to_byte(result.diffuse[3]);
-	}
-	else
-	{
-		vertex->color = 0xffffffffUL;
-	}
+	vertex->color = output_color(result.diffuse);
+	vertex->specular = output_color(result.specular);
+	vertex->fog = D3D__RenderState[D3DRS_FOGENABLE] ? fog_factor(result.fog) : 1.0f;
 	for (index = 0; index < GXB_MAXIMUM_TEXTURES; index++)
 	{
 		vertex->texcoords[index][0] = result.texcoords[index][0];
@@ -1051,7 +1180,6 @@ static void transform_streams(unsigned long first, unsigned long count)
 {
 	struct vertex_shader_object *declaration = device.vertex_shader;
 	const struct nv2a_vsh_program *program = current_program();
-	BOOL writes_diffuse = current_writes_diffuse();
 	float inputs[NV2A_VSH_ATTRIBUTE_COUNT][4];
 	unsigned long vertex, element;
 
@@ -1069,7 +1197,7 @@ static void transform_streams(unsigned long first, unsigned long count)
 			read_attribute(source, (const unsigned char *)data +
 				(first + vertex) * device.streams[source->stream].stride + source->offset, inputs[source->reg]);
 		}
-		transform_vertex(program, writes_diffuse, (const float (*)[4])inputs, &device.vertices[vertex],
+		transform_vertex(program, (const float (*)[4])inputs, &device.vertices[vertex],
 			device.clips[vertex]);
 	}
 }
@@ -1190,8 +1318,7 @@ static BOOL draw_prepare(void)
 		return FALSE;
 	}
 	apply_raster_state();
-	apply_textures();
-	return TRUE;
+	return apply_pixel_shader();
 }
 
 /* the draw's vertices [0, count) to GX, in order, or by the indices */
@@ -1289,18 +1416,15 @@ void WINAPI D3DDevice_End(void)
 	unsigned long floats = NV2A_VSH_ATTRIBUTE_COUNT * 4;
 	unsigned long index, count = device.immediate_count;
 	const struct nv2a_vsh_program *program;
-	BOOL writes_diffuse;
 
 	device.immediate_active = FALSE;
 	if (!count || !draw_prepare())
 		return;
 	program = current_program();
-	writes_diffuse = current_writes_diffuse();
 	reserve_vertices(count);
 	for (index = 0; index < count; index++)
 	{
-		transform_vertex(program, writes_diffuse,
-			(const float (*)[4])(device.immediate_vertices + index * floats),
+		transform_vertex(program, (const float (*)[4])(device.immediate_vertices + index * floats),
 			&device.vertices[index], device.clips[index]);
 	}
 	draw_transformed(device.immediate_type, count, NULL, count);
@@ -1399,9 +1523,11 @@ static void log_frame(void)
 	if (device.frame < 4 || device.frame % 600 == 0)
 	{
 		platform_log("Direct3D: frame %lu: %lu draws (%lu vertices: %lu perspective, %lu flat, %lu divided), "
-			"%lu clears, %lu textured; skipped %lu off-screen, %lu without a program, %lu textures",
+			"%lu clears, %lu textured, %lu shaded; skipped %lu off-screen, %lu without a program, %lu whose pixel "
+			"shader does not fit TEV, %lu textures",
 			device.frame, stats.draws, stats.vertices, stats.perspective, stats.orthographic, stats.divided,
-			stats.clears, stats.textured, stats.skipped_target, stats.skipped_program, stats.untextured_format);
+			stats.clears, stats.textured, stats.shaded, stats.skipped_target, stats.skipped_program,
+			stats.skipped_shader, stats.untextured_format);
 	}
 	memset(&stats, 0, sizeof(stats));
 }
