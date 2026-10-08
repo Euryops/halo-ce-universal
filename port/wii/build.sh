@@ -127,6 +127,19 @@ $CC -mrvl -mcpu=750 -meabi -mhard-float $B/tevtest/tevtest_main.o $B/platform/gx
 	-L$D/libogc/lib/wii -logc -lm -o $B/tevtest/tevtest.elf
 $D/tools/bin/elf2dol $B/tevtest/tevtest.elf $B/tevtest/sd/apps/halo-tevtest/boot.dol
 
+echo "==> skinned characters"
+# skintest.dol: skinned characters and the vertex-program effects (plasma,
+# grass) drawn with the game's programs, then checked against skinning done
+# on the CPU (skintest/skintest_scene.c, skintest/check.py)
+mkdir -p $B/skintest/sd/apps/halo-skintest
+compile port/wii/skintest/skintest_scene.c $B/skintest/skintest_scene.o GXTEST
+compile port/wii/skintest/skintest_main.c $B/skintest/skintest_main.o LIBOGC
+$CC -mrvl -mcpu=750 -meabi -mhard-float $B/skintest/skintest_main.o $B/skintest/skintest_scene.o \
+	$B/platform/d3d8_gx.o $B/platform/d3d8_gx_resources.o $B/platform/gx_backend.o $B/platform/nv2a_vsh_run.o \
+	$B/platform/nv2a_tev.o \
+	-L$D/libogc/lib/wii -lfat -logc -lm -o $B/skintest/skintest.elf
+$D/tools/bin/elf2dol $B/skintest/skintest.elf $B/skintest/sd/apps/halo-skintest/boot.dol
+
 echo "==> Homebrew Channel folder"
 cp port/wii/hbc/meta.xml port/wii/hbc/icon.png $B/sd/apps/halo/
 # the same, zipped, to unzip at the root of a card

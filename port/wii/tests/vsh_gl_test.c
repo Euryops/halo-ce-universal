@@ -9,7 +9,10 @@ GLSL the PC build draws with, Mesa's software GL runs it with no display
 of every vertex. The same vertices go through the Wii's path: the vertex
 bytes read by the program's own declaration (nv2a_vsh_fetch, where the PC
 build lets GL read them with the formats d3d8_gl.c gives it), the
-interpreter, and the clip position recovered (nv2a_vsh_clip_position).
+interpreter, and the clip position recovered (nv2a_vsh_clip_position). The
+batch executor the device runs (nv2a_vsh_fetch_lanes, nv2a_vsh_compile,
+nv2a_vsh_run_batch), compiled for every output and then for some, must give
+the interpreter's results to the bit.
 
 Each program runs on random vertices of its declaration's layout with
 random constants, as well as the shapes the game gives them where they
@@ -455,31 +458,81 @@ static float clamp01(float x)
 	return x < 0.0f ? 0.0f : x > 1.0f ? 1.0f : x;
 }
 
-static void run_wii(int program_index, const struct layout *layout, float (*out)[OUTPUT_FLOATS])
+static void fetch_inputs(const struct layout *layout, int vertex, float inputs[NV2A_VSH_ATTRIBUTE_COUNT][4])
+{
+	int which, index;
+
+	memset(inputs, 0, sizeof(float) * NV2A_VSH_ATTRIBUTE_COUNT * 4);
+	for (index = 0; index < NV2A_VSH_ATTRIBUTE_COUNT; index++)
+		inputs[index][3] = 1.0f;
+	for (which = 0; which < layout->count; which++)
+	{
+		const struct element *element = &layout->elements[which];
+
+		nv2a_vsh_fetch(element->type, streams[element->stream] + vertex * layout->strides[element->stream] +
+			element->offset, inputs[element->reg]);
+	}
+}
+
+static const uint8_t all_outputs[16] =
+{
+	0xf, 0xf, 0xf, 0xf, 0xf, 0xf, 0xf, 0xf, 0xf, 0xf, 0xf, 0xf, 0xf, 0xf, 0xf, 0xf,
+};
+
+/* the interpreter's results, or (batch) the batch executor's compiled for
+the outputs' components set in outputs[16], as the outputs are compared */
+static void run_wii(int program_index, const struct layout *layout, float (*out)[OUTPUT_FLOATS], int batch,
+	const uint8_t outputs[16])
 {
 	const uint32_t *words = vsh_program_words(program_index);
 	struct nv2a_vsh_program program;
+	static struct nv2a_vsh_compiled compiled;
+	static struct nv2a_vsh_lanes lanes;
 	int vertex;
 
 	nv2a_vsh_decode(words + 1, words[0] >> 16, &program);
+	nv2a_vsh_compile(&program, outputs, &compiled);
 	for (vertex = 0; vertex < VERTEX_COUNT; vertex++)
 	{
 		float inputs[NV2A_VSH_ATTRIBUTE_COUNT][4];
 		struct nv2a_vsh_result result;
 		float *o = out[vertex];
-		int which, index;
+		int index;
 
-		memset(inputs, 0, sizeof(inputs));
-		for (index = 0; index < NV2A_VSH_ATTRIBUTE_COUNT; index++)
-			inputs[index][3] = 1.0f;
-		for (which = 0; which < layout->count; which++)
+		if (!batch)
 		{
-			const struct element *element = &layout->elements[which];
-
-			nv2a_vsh_fetch(element->type, streams[element->stream] + vertex * layout->strides[element->stream] +
-				element->offset, inputs[element->reg]);
+			fetch_inputs(layout, vertex, inputs);
+			nv2a_vsh_run(&program, (const float (*)[4])constants, (const float (*)[4])inputs, &result);
 		}
-		nv2a_vsh_run(&program, (const float (*)[4])constants, (const float (*)[4])inputs, &result);
+		else
+		{
+			/* a batch at a time: the first vertex of each fills and runs it */
+			unsigned long lane = vertex % NV2A_VSH_BATCH;
+
+			if (!lane)
+			{
+				unsigned long count = VERTEX_COUNT - vertex < NV2A_VSH_BATCH ? VERTEX_COUNT - vertex : NV2A_VSH_BATCH;
+				unsigned long at;
+				int reg, component, which;
+
+				/* as the device fills a batch: the elements a batch at a time
+				(nv2a_vsh_fetch_lanes), the rest (0, 0, 0, 1) */
+				for (reg = 0; reg < NV2A_VSH_ATTRIBUTE_COUNT; reg++)
+					for (component = 0; component < 4; component++)
+						for (at = 0; at < count; at++)
+							lanes.rows[NV2A_VSH_FILE_INPUTS + reg][component][at] = component == 3 ? 1.0f : 0.0f;
+				for (which = 0; which < layout->count; which++)
+				{
+					const struct element *element = &layout->elements[which];
+					unsigned long stride = layout->strides[element->stream];
+
+					nv2a_vsh_fetch_lanes(element->type, streams[element->stream] + vertex * stride + element->offset,
+						stride, count, lanes.rows[NV2A_VSH_FILE_INPUTS + element->reg]);
+				}
+				nv2a_vsh_run_batch(&compiled, (const float (*)[4])constants, &lanes, count);
+			}
+			nv2a_vsh_lanes_result(&compiled, &lanes, lane, &result);
+		}
 		nv2a_vsh_clip_position(&result, constant(-38), constant(-37), constant(-38), constant(-37), o);
 		for (index = 0; index < 4; index++)
 		{
@@ -500,6 +553,47 @@ static void run_wii(int program_index, const struct layout *layout, float (*out)
 
 static float reference[VERTEX_COUNT][OUTPUT_FLOATS];
 static float wii[VERTEX_COUNT][OUTPUT_FLOATS];
+static float batch[VERTEX_COUNT][OUTPUT_FLOATS];
+
+/* each output float's register (o[]) and component, as the outputs are
+compared; the clip position is r12's and always kept */
+static const struct
+{
+	int reg, component;
+} output_registers[OUTPUT_FLOATS / 4 + 1] =
+{
+	{ 0, 0 }, { NV2A_VSH_OUTPUT_DIFFUSE, 0 }, { NV2A_VSH_OUTPUT_SPECULAR, 0 }, { NV2A_VSH_OUTPUT_BACK_DIFFUSE, 0 },
+	{ NV2A_VSH_OUTPUT_BACK_SPECULAR, 0 }, { NV2A_VSH_OUTPUT_TEXCOORD0, 0 }, { NV2A_VSH_OUTPUT_TEXCOORD0 + 1, 0 },
+	{ NV2A_VSH_OUTPUT_TEXCOORD0 + 2, 0 }, { NV2A_VSH_OUTPUT_TEXCOORD0 + 3, 0 }, { NV2A_VSH_OUTPUT_FOG, 0 },
+};
+
+/* the batch executor against the interpreter: the same bits, in every
+component it was compiled for */
+static int compare_batch(int program_index, const uint8_t outputs[16])
+{
+	int vertex, index;
+
+	for (vertex = 0; vertex < VERTEX_COUNT; vertex++)
+	{
+		for (index = 0; index < OUTPUT_FLOATS; index++)
+		{
+			float a = wii[vertex][index], b = batch[vertex][index];
+			int reg = output_registers[index / 4].reg;
+
+			if (reg && !(outputs[reg] & (8 >> (index % 4))))
+				continue;
+
+			if (memcmp(&a, &b, sizeof(a)) && !(isnan(a) && isnan(b)))
+			{
+				printf("FAIL program %d: the batch executor's vertex %d %s.%c is %.9g, the interpreter's %.9g"
+					" (compiled for %s)\n", program_index, vertex, output_labels[index / 4], "xyzw"[index % 4], b, a,
+					outputs == all_outputs ? "every output" : "some outputs");
+				return 0;
+			}
+		}
+	}
+	return 1;
+}
 
 static int same(float a, float b)
 {
@@ -586,16 +680,33 @@ int main(int argc, char **argv)
 				failed++;
 				break;
 			}
-			run_wii(index, &layout, wii);
-			if (!compare(index, verbose >= 0 && round == 0))
+			run_wii(index, &layout, wii, 0, all_outputs);
+			run_wii(index, &layout, batch, 1, all_outputs);
+			if (!compare(index, verbose >= 0 && round == 0) || !compare_batch(index, all_outputs))
 			{
 				failed++;
 				break;
+			}
+			/* and compiled for a few of the outputs' components, each round
+			others, as the device compiles for those it reads */
+			{
+				uint8_t some[16];
+				int reg;
+
+				for (reg = 0; reg < 16; reg++)
+					some[reg] = (uint8_t)(random_word() & (random_word() & 1 ? 0xf : 0xc));
+				run_wii(index, &layout, batch, 1, some);
+				if (!compare_batch(index, some))
+				{
+					failed++;
+					break;
+				}
 			}
 		}
 		if (round == 4)
 			passed++;
 	}
-	printf("vsh_gl_test: %d programs as the Linux port's GLSL computes them, %d not\n", passed, failed);
+	printf("vsh_gl_test: %d programs as the Linux port's GLSL computes them (the interpreter, and the batch"
+		" executor to the bit), %d not\n", passed, failed);
 	return failed != 0;
 }

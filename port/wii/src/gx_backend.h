@@ -142,6 +142,11 @@ read (textures the CPU made) */
 void gxb_flush(const void *address, unsigned long size);
 /* 32-byte aligned memory for converted textures */
 void *gxb_allocate(unsigned long size);
+
+/* the CPU's time base, and its ticks in microseconds: for the device's
+own accounts of where a frame's time goes */
+unsigned long long gxb_ticks(void);
+float gxb_ticks_to_microseconds(unsigned long long ticks);
 void gxb_free(void *memory);
 
 #endif /* __GX_BACKEND_H */

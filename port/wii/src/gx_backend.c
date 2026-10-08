@@ -20,6 +20,7 @@ frame buffer (wii_main.c), which comes back when the game halts.
 #include <malloc.h>
 #include <string.h>
 #include <gccore.h>
+#include <ogc/lwp_watchdog.h>
 
 #include "gx_backend.h"
 #include "nv2a_tev.h"
@@ -419,6 +420,16 @@ static u8 gx_primitive(enum gxb_primitive primitive, unsigned *group)
 	case _gxb_quads: *group = 4; return GX_QUADS;
 	default: *group = 3; return GX_TRIANGLES;
 	}
+}
+
+unsigned long long gxb_ticks(void)
+{
+	return gettime();
+}
+
+float gxb_ticks_to_microseconds(unsigned long long ticks)
+{
+	return (float)ticks / (TB_TIMER_CLOCK / 1000.0f);
 }
 
 static void emit(const struct gxb_vertex *vertex, int texcoord_count)

@@ -73,8 +73,20 @@ struct vertex_shader_object
 	unsigned long signature;
 	unsigned long id;
 	struct nv2a_vsh_program *program;
+	/* the program compiled for the outputs the device reads (nv2a_vsh_run.h) */
+	struct nv2a_vsh_compiled *compiled;
 	struct vertex_element elements[NV2A_VSH_ATTRIBUTE_COUNT];
 	unsigned long element_count;
+	/* the element that fills each input register, or -1 */
+	signed char element_of_register[NV2A_VSH_ATTRIBUTE_COUNT];
+};
+
+/* what the device reads of what a program writes, by output register
+(bit 3 x ... bit 0 w): both colors, the texture coordinates' u and v, the
+fog; the position is always kept */
+static const uint8_t device_outputs[16] =
+{
+	0, 0, 0, 0xf, 0xf, 0x8, 0, 0, 0, 0xc, 0xc, 0xc, 0xc, 0, 0, 0,
 };
 
 /* ---------- the device */
@@ -138,6 +150,10 @@ static struct
 	/* draws with the game's pixel shader as TEV stages, and those whose
 	shader did not fit TEV (skipped) */
 	unsigned long shaded, skipped_shader;
+	/* where the draws' time went: their vertex programs (reading the
+	vertices, running the programs, the results to GX's form), fitting
+	their projections, and handing them to GX */
+	unsigned long long transform_ticks, fit_ticks, submit_ticks;
 } stats;
 
 /* frames shown: a presented frame is counted at the vertical blank that
@@ -608,6 +624,7 @@ static void parse_declaration(struct vertex_shader_object *object, const DWORD *
 	unsigned long stream = 0;
 	unsigned long offsets[16] = { 0 };
 
+	memset(object->element_of_register, -1, sizeof(object->element_of_register));
 	for (; declaration && *declaration != D3DVSD_END(); declaration++)
 	{
 		DWORD token = *declaration;
@@ -636,6 +653,8 @@ static void parse_declaration(struct vertex_shader_object *object, const DWORD *
 				element->bytes = (unsigned char)nv2a_vsh_type_bytes(element->type);
 				element->offset = (unsigned short)offsets[stream];
 				offsets[stream] += element->bytes;
+				if (element->reg < NV2A_VSH_ATTRIBUTE_COUNT)
+					object->element_of_register[element->reg] = (signed char)(object->element_count - 1);
 			}
 			break;
 		case D3DVSD_TOKEN_CONSTMEM:
@@ -664,14 +683,21 @@ HRESULT WINAPI D3DDevice_CreateVertexShader(CONST DWORD *declaration, CONST DWOR
 		unsigned long index;
 
 		object->program = malloc(sizeof(*object->program));
+		object->compiled = malloc(sizeof(*object->compiled));
 		/* header: program type in the low word, instruction count in the high */
-		if (!object->program ||
+		if (!object->program || !object->compiled ||
 			!nv2a_vsh_decode((const uint32_t *)(function + 1), function[0] >> 16, object->program))
 		{
 			platform_log("Direct3D: vertex shader %lu has %lu instructions, more than the NV2A's",
 				object->id, (unsigned long)(function[0] >> 16));
 			free(object->program);
+			free(object->compiled);
 			object->program = NULL;
+			object->compiled = NULL;
+		}
+		else
+		{
+			nv2a_vsh_compile(object->program, device_outputs, object->compiled);
 		}
 	}
 	parse_declaration(object, declaration);
@@ -740,13 +766,13 @@ void WINAPI D3DDevice_SetVertexShaderConstant(INT reg, CONST void *constant_data
 
 /* the program that runs: the one loaded at the selected address, else the
 current shader's own; its declaration is always the current shader's */
-static const struct nv2a_vsh_program *current_program(void)
+static const struct nv2a_vsh_compiled *current_program(void)
 {
 	struct vertex_shader_object *program = device.program_slots[device.program_address];
 
 	if (!program)
 		program = device.vertex_shader;
-	return program ? program->program : NULL;
+	return program ? program->compiled : NULL;
 }
 
 /* ---------- per-draw state */
@@ -1025,59 +1051,100 @@ static void reserve_indices(unsigned long count)
 	device.indices = malloc(device.index_capacity * sizeof(*device.indices));
 }
 
-/* the bytes of a color, red in the top byte, from a program's output */
-static uint32_t output_color(const float *value)
-{
-	return ((uint32_t)unit_to_byte(value[0]) << 24) | ((uint32_t)unit_to_byte(value[1]) << 16) |
-		((uint32_t)unit_to_byte(value[2]) << 8) | unit_to_byte(value[3]);
-}
+/* the batch the programs run in (nv2a_vsh_run_batch) */
+static struct nv2a_vsh_lanes lanes;
 
-/* runs the program for one vertex's inputs, into the draw's vertex and
-clip position */
-static void transform_vertex(const struct nv2a_vsh_program *program, const float (*inputs)[4],
-	struct gxb_vertex *vertex, float clip[4])
+/* the batch's results, into the draw's vertices and clip positions from
+first on */
+static void lanes_to_vertices(const struct nv2a_vsh_compiled *program, unsigned long first, unsigned long count)
 {
-	struct nv2a_vsh_result result;
+	const float (*diffuse)[NV2A_VSH_BATCH] = lanes.rows[NV2A_VSH_FILE_OUTPUTS + NV2A_VSH_OUTPUT_DIFFUSE];
+	const float (*specular)[NV2A_VSH_BATCH] = lanes.rows[NV2A_VSH_FILE_OUTPUTS + NV2A_VSH_OUTPUT_SPECULAR];
+	const float *fog = lanes.rows[NV2A_VSH_FILE_OUTPUTS + NV2A_VSH_OUTPUT_FOG][0];
+	BOOL fog_enabled = D3D__RenderState[D3DRS_FOGENABLE] != 0;
+	unsigned long lane;
 	int index;
 
-	nv2a_vsh_run(program, (const float (*)[4])device.constants, inputs, &result);
-	nv2a_vsh_clip_position(&result, device.constants[NV2A_VSH_CONSTANT_BIAS - 38],
-		device.constants[NV2A_VSH_CONSTANT_BIAS - 37], device.viewport_scale, device.viewport_offset, clip);
-	vertex->color = output_color(result.diffuse);
-	vertex->specular = output_color(result.specular);
-	vertex->fog = D3D__RenderState[D3DRS_FOGENABLE] ? fog_factor(result.fog) : 1.0f;
-	for (index = 0; index < GXB_MAXIMUM_TEXTURES; index++)
+	nv2a_vsh_lanes_clip_positions(program, &lanes, count, device.constants[NV2A_VSH_CONSTANT_BIAS - 38],
+		device.constants[NV2A_VSH_CONSTANT_BIAS - 37], device.viewport_scale, device.viewport_offset,
+		device.clips + first);
+	for (lane = 0; lane < count; lane++)
 	{
-		vertex->texcoords[index][0] = result.texcoords[index][0];
-		vertex->texcoords[index][1] = result.texcoords[index][1];
+		struct gxb_vertex *vertex = &device.vertices[first + lane];
+
+		vertex->color = ((uint32_t)unit_to_byte(diffuse[0][lane]) << 24) |
+			((uint32_t)unit_to_byte(diffuse[1][lane]) << 16) | ((uint32_t)unit_to_byte(diffuse[2][lane]) << 8) |
+			unit_to_byte(diffuse[3][lane]);
+		vertex->specular = ((uint32_t)unit_to_byte(specular[0][lane]) << 24) |
+			((uint32_t)unit_to_byte(specular[1][lane]) << 16) | ((uint32_t)unit_to_byte(specular[2][lane]) << 8) |
+			unit_to_byte(specular[3][lane]);
+		vertex->fog = fog_enabled ? fog_factor(fog[lane]) : 1.0f;
+		for (index = 0; index < GXB_MAXIMUM_TEXTURES; index++)
+		{
+			vertex->texcoords[index][0] = lanes.rows[NV2A_VSH_FILE_OUTPUTS + NV2A_VSH_OUTPUT_TEXCOORD0 + index][0][lane];
+			vertex->texcoords[index][1] = lanes.rows[NV2A_VSH_FILE_OUTPUTS + NV2A_VSH_OUTPUT_TEXCOORD0 + index][1][lane];
+		}
 	}
 }
 
-/* runs the program for vertices [first, first + count) of the streams */
+/* an input register's components the program reads, for every vertex of
+the batch, from the current value (SetVertexData) */
+static void lanes_input_current(int reg, unsigned live, unsigned long count)
+{
+	int component;
+	unsigned long lane;
+
+	for (component = 0; component < 4; component++)
+	{
+		float value = device.attributes[reg][component];
+		float *row = lanes.rows[NV2A_VSH_FILE_INPUTS + reg][component];
+
+		if (!(live & (8 >> component)))
+			continue;
+		for (lane = 0; lane < count; lane++)
+			row[lane] = value;
+	}
+}
+
+/* runs the program for vertices [first, first + count) of the streams, a
+batch at a time */
 static void transform_streams(unsigned long first, unsigned long count)
 {
 	struct vertex_shader_object *declaration = device.vertex_shader;
-	const struct nv2a_vsh_program *program = current_program();
-	float inputs[NV2A_VSH_ATTRIBUTE_COUNT][4];
-	unsigned long vertex, element;
+	const struct nv2a_vsh_compiled *program = current_program();
+	unsigned long done;
+	unsigned long long start = gxb_ticks();
 
 	reserve_vertices(count);
-	for (vertex = 0; vertex < count; vertex++)
+	for (done = 0; done < count; done += NV2A_VSH_BATCH)
 	{
-		memcpy(inputs, device.attributes, sizeof(inputs));
-		for (element = 0; element < declaration->element_count; element++)
-		{
-			const struct vertex_element *source = &declaration->elements[element];
-			DWORD data = device.streams[source->stream].data;
+		unsigned long batch = count - done < NV2A_VSH_BATCH ? count - done : NV2A_VSH_BATCH;
+		int reg;
 
-			if (!data || source->reg >= NV2A_VSH_ATTRIBUTE_COUNT)
+		for (reg = 0; reg < NV2A_VSH_ATTRIBUTE_COUNT; reg++)
+		{
+			unsigned live = program->live_in[NV2A_VSH_FILE_INPUTS + reg];
+			int which = declaration->element_of_register[reg];
+			const struct vertex_element *source;
+			const unsigned char *data;
+			unsigned long stride;
+
+			if (!live)
 				continue;
-			nv2a_vsh_fetch(source->type, (const unsigned char *)data +
-				(first + vertex) * device.streams[source->stream].stride + source->offset, inputs[source->reg]);
+			source = which >= 0 ? &declaration->elements[which] : NULL;
+			if (!source || !device.streams[source->stream].data)
+			{
+				lanes_input_current(reg, live, batch);
+				continue;
+			}
+			stride = device.streams[source->stream].stride;
+			data = (const unsigned char *)device.streams[source->stream].data + (first + done) * stride + source->offset;
+			nv2a_vsh_fetch_lanes(source->type, data, stride, batch, lanes.rows[NV2A_VSH_FILE_INPUTS + reg]);
 		}
-		transform_vertex(program, (const float (*)[4])inputs, &device.vertices[vertex],
-			device.clips[vertex]);
+		nv2a_vsh_run_batch(program, (const float (*)[4])device.constants, &lanes, batch);
+		lanes_to_vertices(program, done, batch);
 	}
+	stats.transform_ticks += gxb_ticks() - start;
 }
 
 /* the projection the draw's vertices are given to GX with, and their
@@ -1204,8 +1271,11 @@ static void draw_transformed(D3DPRIMITIVETYPE type, unsigned long vertex_count, 
 	unsigned long count)
 {
 	struct gxb_projection projection;
+	unsigned long long start = gxb_ticks();
 
 	fit_projection(vertex_count, &projection);
+	stats.fit_ticks += gxb_ticks() - start;
+	start = gxb_ticks();
 	if (type == D3DPT_LINELOOP)
 	{
 		/* closed by its first vertex again */
@@ -1219,6 +1289,7 @@ static void draw_transformed(D3DPRIMITIVETYPE type, unsigned long vertex_count, 
 		count++;
 	}
 	gxb_draw(gx_primitive(type), &projection, device.vertices, indices, count);
+	stats.submit_ticks += gxb_ticks() - start;
 	stats.draws++;
 	stats.vertices += vertex_count;
 }
@@ -1293,17 +1364,33 @@ void WINAPI D3DDevice_End(void)
 {
 	unsigned long floats = NV2A_VSH_ATTRIBUTE_COUNT * 4;
 	unsigned long index, count = device.immediate_count;
-	const struct nv2a_vsh_program *program;
+	const struct nv2a_vsh_compiled *program;
 
 	device.immediate_active = FALSE;
 	if (!count || !draw_prepare())
 		return;
 	program = current_program();
 	reserve_vertices(count);
-	for (index = 0; index < count; index++)
+	for (index = 0; index < count; index += NV2A_VSH_BATCH)
 	{
-		transform_vertex(program, (const float (*)[4])(device.immediate_vertices + index * floats),
-			&device.vertices[index], device.clips[index]);
+		unsigned long batch = count - index < NV2A_VSH_BATCH ? count - index : NV2A_VSH_BATCH, lane;
+		int reg, component;
+
+		for (reg = 0; reg < NV2A_VSH_ATTRIBUTE_COUNT; reg++)
+		{
+			unsigned live = program->live_in[NV2A_VSH_FILE_INPUTS + reg];
+
+			for (component = 0; component < 4; component++)
+			{
+				if (!(live & (8 >> component)))
+					continue;
+				for (lane = 0; lane < batch; lane++)
+					lanes.rows[NV2A_VSH_FILE_INPUTS + reg][component][lane] =
+						device.immediate_vertices[(index + lane) * floats + reg * 4 + component];
+			}
+		}
+		nv2a_vsh_run_batch(program, (const float (*)[4])device.constants, &lanes, batch);
+		lanes_to_vertices(program, index, batch);
 	}
 	draw_transformed(device.immediate_type, count, NULL, count);
 }
@@ -1402,10 +1489,12 @@ static void log_frame(void)
 	{
 		platform_log("Direct3D: frame %lu: %lu draws (%lu vertices: %lu perspective, %lu flat, %lu divided), "
 			"%lu clears, %lu textured, %lu shaded; skipped %lu off-screen, %lu without a program, %lu whose pixel "
-			"shader does not fit TEV, %lu textures",
+			"shader does not fit TEV, %lu textures; %.0f us in vertex programs, %.0f fitting projections, "
+			"%.0f handing vertices to GX",
 			device.frame, stats.draws, stats.vertices, stats.perspective, stats.orthographic, stats.divided,
 			stats.clears, stats.textured, stats.shaded, stats.skipped_target, stats.skipped_program,
-			stats.skipped_shader, stats.untextured_format);
+			stats.skipped_shader, stats.untextured_format, gxb_ticks_to_microseconds(stats.transform_ticks),
+			gxb_ticks_to_microseconds(stats.fit_ticks), gxb_ticks_to_microseconds(stats.submit_ticks));
 	}
 	memset(&stats, 0, sizeof(stats));
 }
