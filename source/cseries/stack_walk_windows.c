@@ -342,9 +342,10 @@ void stack_walk_with_context(
 
 		for (frame_number = levels_dumped - 1; frame_number >= levels_to_ignore; frame_number--)
 		{
-#ifdef HALO_ANDROID
+#if defined(HALO_ANDROID) || defined(GEKKO)
 			/* the call site (the BL before the return address), for
-			llvm-symbolizer --obj=build/android/halo_guest.elf */
+			llvm-symbolizer --obj=build/android/halo_guest.elf, or on the
+			Wii powerpc-eabi-addr2line -e build/wii/halo.elf */
 			unsigned long routine_address = routine_addresses[frame_number] - 4;
 #else
 			unsigned long routine_address = routine_addresses[frame_number] + *(long *)(routine_addresses[frame_number] - sizeof(long));
@@ -762,6 +763,19 @@ static unsigned long walk_up(
 
 	if (walk_up_current_frame)
 	{
+#ifdef GEKKO
+		/* a PowerPC EABI frame: its first word is the back chain to the
+		caller's frame, whose second word is where this frame's routine
+		saved its return address into the caller */
+		walk_up_current_frame = ((unsigned long *)walk_up_current_frame)[0];
+		routine_address = walk_up_current_frame ? ((unsigned long *)walk_up_current_frame)[1] : 0;
+		if (!is_valid_ebp())
+		{
+			walk_up_current_frame = 0;
+		}
+		old_ebp = (unsigned long *)walk_up_current_frame;
+		return routine_address;
+#endif
 #ifdef HALO_ANDROID
 		/* an AArch64 frame record: the caller's frame pointer, then the
 		return address, 8 bytes each (the upper halves are zero) */

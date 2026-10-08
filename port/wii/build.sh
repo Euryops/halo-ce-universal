@@ -3,7 +3,8 @@
 # the parts of the Linux port that need no host OS, linked with libogc into a
 # .dol, and the Homebrew Channel folder around it. Run from anywhere in a
 # checkout; needs docker and the devkitpro/devkitppc image.
-#   ./port/wii/build.sh          -> build/wii/sd/apps/halo/{boot.dol,meta.xml,icon.png}
+#   ./port/wii/build.sh          -> build/wii/sd/apps/halo/{boot.dol,meta.xml,icon.png},
+#                                   and the same as build/wii/halo-wii-sd.zip
 #   ./port/wii/build.sh clean    -> start again from nothing
 # Units are only recompiled when their source is newer than their object, so
 # after a header change, build clean.
@@ -69,9 +70,10 @@ for f in port/wii/src/wii_crt.c port/wii/src/wii_xbox.c port/linux/src/halo_link
 		port/linux/src/msvc_wide.c port/linux/src/bink_null.c port/linux/src/xbdm.c; do
 	compile "$f" "$B/platform/$(basename "$f" .c).o" PLATFORM
 done
-# wii_main.c sees libogc and not the XDK
+# wii_main.c and wii_os.c see libogc and not the XDK
 LIBOGC="$ABI -std=gnu11 -Wall -I$D/libogc/include"
 compile port/wii/src/wii_main.c $B/platform/wii_main.o LIBOGC
+compile port/wii/src/wii_os.c $B/platform/wii_os.o LIBOGC
 # the game's sin, pow and the rest, the same on every port (port/include/halo_math.h)
 MUSL="$ABI -std=gnu11 -w -Iport/third_party/musl-math/include -include port/third_party/musl-math/include/libm.h"
 for f in port/third_party/musl-math/src/*.c; do compile "$f" "$B/musl/$(basename "$f" .c).o" MUSL; done
@@ -85,7 +87,7 @@ echo "==> link"
 # libogc's start-up calls main: wrap it (wii_main.c), and exit with it
 LINK=(-mrvl -mcpu=750 -meabi -mhard-float -Wl,--wrap=main -Wl,--wrap=exit
 	$B/game/*.o $B/platform/*.o $B/musl/*.o $B/zlib/*.o)
-LIBS=(-L$D/libogc/lib/wii -logc -lm)
+LIBS=(-L$D/libogc/lib/wii -lfat -logc -lm)
 # first without stubs, to learn what is missing; then every missing name gets one
 $CC "${LINK[@]}" "${LIBS[@]}" -o $B/halo.elf >$B/link1.log 2>&1 || true
 $OBJDUMP -r $B/game/*.o $B/platform/*.o | awk 'NF==3 && $2 ~ /^R_PPC/' | sort -u >$B/relocs.txt
@@ -97,4 +99,9 @@ $D/tools/bin/elf2dol $B/halo.elf $B/sd/apps/halo/boot.dol
 
 echo "==> Homebrew Channel folder"
 cp port/wii/hbc/meta.xml port/wii/hbc/icon.png $B/sd/apps/halo/
-ls -l $B/sd/apps/halo
+# the same, zipped, to unzip at the root of a card
+(cd $B/sd && rm -f ../halo-wii-sd.zip && python3 -c "import sys, zipfile, os
+z = zipfile.ZipFile(sys.argv[1], 'w', zipfile.ZIP_DEFLATED)
+for root, dirs, files in os.walk('apps'):
+    for name in sorted(files): z.write(os.path.join(root, name))" ../halo-wii-sd.zip)
+ls -l $B/sd/apps/halo $B/halo-wii-sd.zip

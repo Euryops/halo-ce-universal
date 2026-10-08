@@ -4,17 +4,18 @@ WII_CRT.C
 The Microsoft C runtime names the game calls that newlib does not have, and
 the Xbox-path fopen family the game's headers redirect to
 (port/linux/include/stdio.h). The counterpart of port/linux/src/msvc_crt.c,
-cut down to what stage 1 needs: there is no file system yet, so the only file
-the game can open is its log, d:\debug.txt, which goes to the console.
+cut down to what the Wii needs so far.
 */
 
 #include "platform.h"
 
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 /* ---------- strings */
 
@@ -164,48 +165,76 @@ int halo_linux_printf(const char *format, ...)
 	return result;
 }
 
-/* ---------- files by Xbox path */
+/* ---------- files by Xbox path
 
-/* the game's log is the console; nothing else exists until the SD card
-(stage 3). The log is written in "\r\n" lines, which the console shows as
-they are. */
+The game's log, d:\\debug.txt, is the console (which wii_os.c copies to the
+card's debug.txt); every other path goes to the SD card as CreateFile's do
+(wii_xbox.c). */
+
+BOOL wii_translate_path(const char *xbox_path, char *path, size_t size);
+
 FILE *halo_linux_fopen(const char *path, const char *mode)
 {
+	char card_path[1024];
+
 	if (!_stricmp(path, "d:\\debug.txt"))
 		return stdout;
-	platform_log("fopen %s: no file system yet", path);
-	errno = ENOENT;
-	return NULL;
+	if (!wii_translate_path(path, card_path, sizeof(card_path)))
+	{
+		errno = ENOENT;
+		return NULL;
+	}
+	return fopen(card_path, mode);
 }
 
 int halo_linux_remove(const char *path)
 {
-	errno = ENOENT;
-	return -1;
+	char card_path[1024];
+
+	if (!wii_translate_path(path, card_path, sizeof(card_path)))
+	{
+		errno = ENOENT;
+		return -1;
+	}
+	return remove(card_path);
 }
 
 int halo_linux_open(const char *path, int flags, ...)
 {
-	platform_log("open %s: no file system yet", path);
-	errno = ENOENT;
-	return -1;
+	char card_path[1024];
+	int mode = 0666;
+
+	if (flags & O_CREAT)
+	{
+		va_list arguments;
+
+		va_start(arguments, flags);
+		mode = va_arg(arguments, int);
+		va_end(arguments);
+	}
+	if (!wii_translate_path(path, card_path, sizeof(card_path)))
+	{
+		errno = ENOENT;
+		return -1;
+	}
+	return open(card_path, flags, mode);
 }
 
 int _close(int handle)
 {
-	errno = EBADF;
-	return -1;
+	return close(handle);
 }
 
 int _write(int handle, const void *buffer, unsigned int count)
 {
-	if (handle == 1 || handle == 2)
-		return fwrite(buffer, 1, count, stdout);
-	errno = EBADF;
-	return -1;
+	return write(handle, buffer, count);
 }
 
-int _fstat(int handle, void *buffer)
+/* MSVC's _fstat, whose struct _stat is not newlib's (which declares its own
+_fstat), for libtiff's file size; nothing reaches it yet */
+int msvc_fstat(int handle, void *buffer) __asm__("_fstat");
+
+int msvc_fstat(int handle, void *buffer)
 {
 	errno = EBADF;
 	return -1;

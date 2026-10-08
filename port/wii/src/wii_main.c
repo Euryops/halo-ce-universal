@@ -5,7 +5,8 @@ The Wii's entry point, around the game's own main() (shell_xbox.c). The link
 wraps main (-Wl,--wrap=main): libogc's start-up calls __wrap_main here, which
 brings up the video and the text console, then runs the game's main as
 __real_main. Everything the game logs (d:\debug.txt, see wii_crt.c) and
-everything this layer logs goes to that console.
+everything this layer logs goes to that console, and to sd:/halo/debug.txt
+when there is a card.
 
 This file sees libogc and not the XDK, whose names (BOOL, u32, ...) clash
 with libogc's.
@@ -18,6 +19,7 @@ with libogc's.
 #include <gccore.h>
 
 #include "../halo_wii_capacity.h"
+#include "wii_os.h"
 
 int __real_main(int argc, char **argv);
 
@@ -84,10 +86,15 @@ int __wrap_main(int argc, char **argv)
 
 	reserve_fixed_places();
 	video_initialize();
+	/* the game's threads run at main's priority (wii_os.c) */
+	LWP_SetThreadPriority(LWP_GetSelf(), 64);
+	if (wii_storage_mount())
+		wii_console_log_to_storage();
 	printf("\x1b[2;0H");
-	printf("Halo: Combat Evolved for the Wii (stage 1: stub platform layer)\n");
-	printf("heap: MEM1 %p-%p, MEM2 %p-%p\n\n",
+	printf("Halo: Combat Evolved for the Wii (stub platform layer)\n");
+	printf("heap: MEM1 %p-%p, MEM2 %p-%p\n",
 		SYS_GetArena1Lo(), SYS_GetArena1Hi(), SYS_GetArena2Lo(), SYS_GetArena2Hi());
+	printf("data: %s\n\n", wii_data_root() ? "sd:/halo (this log is sd:/halo/debug.txt)" : "no SD card");
 
 	result = __real_main(argc, argv);
 

@@ -16,11 +16,17 @@ The result is the Homebrew Channel folder, ready to copy to the root of an SD ca
     build/wii/sd/apps/halo/meta.xml
     build/wii/sd/apps/halo/icon.png
 
-What it does today: it boots, keeps the game's fixed places out of the heap, brings up a
-text console and runs the game's own `main` (`source/shell/shell_xbox.c`). The game's
-log, `d:\debug.txt`, is the console, so its start-up shows on screen: the memory it
-places, the map it cannot read (there is no file system yet) and the asserts where it
-stops, at the cache thread and the Direct3D device. No game data is needed.
+`build/wii/halo-wii-sd.zip` is the same folder zipped: unzip it at the root of the card.
+
+What it does today: it boots, keeps the game's fixed places out of the heap, mounts the
+SD card, brings up a text console and runs the game's own `main`
+(`source/shell/shell_xbox.c`). The game's log, `d:\debug.txt`, is the console, and the
+console is copied to `sd:/halo/debug.txt`, so a run on a real Wii can be read afterwards
+on a PC. The game's start-up shows: the memory it places, its cache thread starting,
+`z:\last_language.dat` and `z:\cache000.map` written to the card, and then
+`no valid map directory exists`, where it stops. There are no maps, and none are needed
+for this stage. Each halt prints its stack; resolve the addresses with
+`powerpc-eabi-addr2line -f -e build/wii/halo.elf <address>...` in the devkitPPC image.
 
 ## What is in the link
 
@@ -28,8 +34,9 @@ stops, at the cache thread and the Direct3D device. No game data is needed.
 | --- | --- |
 | all 498 game units (`source/`, `port/linux/game/`) | as `port/linux/port.json` lists them |
 | entry point, video and console | `src/wii_main.c` (libogc; the link wraps `main` and `exit`) |
+| SD card, the console's copy on it, threads and waitable objects | `src/wii_os.c` (libogc), behind `src/wii_os.h` |
 | C runtime names, printf with `%I64`, `fopen` by Xbox path | `src/wii_crt.c` |
-| XAPI memory, time, errors, events, launch info | `src/wii_xbox.c` |
+| XAPI memory, time, errors, events, mutexes, threads, files, `ReadFileEx`/`WriteFileEx` | `src/wii_xbox.c` |
 | pooled COMMON globals, wide-char runtime, null Bink, empty xbdm | from `port/linux/src/`, unchanged |
 | the game's maths and zlib | `port/third_party/musl-math`, `port/third_party/zlib` |
 | everything else (Direct3D, DirectSound, XInput, XNet, files, ...) | `build/wii/wii_stubs.c` |
@@ -38,6 +45,19 @@ stops, at the cache thread and the Direct3D device. No game data is needed.
 pass finds missing: each stub prints `wii: stub: <name>` the first time it runs and
 returns 0. A stage replaces stubs by writing the real function in `src/`, and the
 stub stops being generated.
+
+The XDK's headers and libogc's cannot be read by one unit (`BOOL`, `u32` and others
+clash), and the port's own `sys/stat.h` is MSVC's, so anything that needs libogc or
+newlib's `stat` goes in `wii_os.c` and is called through `wii_os.h` in plain C types.
+
+## Files
+
+The Xbox's drives are folders of `sd:/halo`: `d:\` is `sd:/halo` itself (the maps go in
+`sd:/halo/maps`, stage 3), and every other drive is `sd:/halo/<letter>`, made on first use.
+FAT is case-insensitive as FATX is. `ReadFileEx` and `WriteFileEx` finish at once, and
+their completion routine runs at the asking thread's next alertable wait, as on Win32.
+The engine's threads run at main's priority (64). Directory listings (`FindFirstFile`)
+are still to do.
 
 ## Memory
 
@@ -58,9 +78,12 @@ so the map converter (stage 2) will have to rebase them to `0x90100000`
 
 On the box, with euryo's runner (`docs/dolphin.md` there):
 
-    ~/euryo/scripts/dolphin/run.sh build/wii/sd/apps/halo/boot.dol 25 <outdir>
+    mkdir -p <card> && cp -r build/wii/sd/apps <card>/
+    ~/euryo/scripts/dolphin/run.sh <card>/apps/halo/boot.dol 25 <outdir> <card>
 
-The frame is `<outdir>/Dump/Frames/framedump_1.png`.
+The frame is `<outdir>/Dump/Frames/framedump_1.png`. With the fourth argument, Dolphin's
+SD card is made from `<card>` and written back to it when Dolphin stops, so the run's
+`<card>/halo/debug.txt` is there to read.
 
 ## Syntax check
 
