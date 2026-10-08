@@ -47,7 +47,7 @@ class Convert(unittest.TestCase):
                 self.assertEqual(fmt, textures.GX_FORMAT_BASE + gx)
                 self.assertFalse(flags & textures.FLAG_SWIZZLED)
                 levels = textures.mip_levels(width, height, depth, kind, mipmaps, xbox_format)
-                self.assertEqual(size, sum(textures.gx_size(gx, w, h) * faces for w, h, d, faces, _ in levels))
+                self.assertEqual(size, sum(textures.gx_size(gx, w, h) * faces * d for w, h, d, faces, _ in levels))
                 self.assertEqual(offset % 32, 0)
                 self.assertLessEqual(offset + size, len(after))
                 seen += 1

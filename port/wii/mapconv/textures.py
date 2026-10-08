@@ -99,6 +99,48 @@ def swizzle(data, width, height, bytes_per_pixel):
     return bytes(out)
 
 
+def _morton_bits_3d(width, height, depth):
+    """Each coordinate's share of the Morton index: x, y then z bits, while
+    each dimension still has bits (XGSwizzleBox's order)."""
+    shares = [[0] * width, [0] * height, [0] * depth]
+    dest, bit = 1, 1
+    while bit < width or bit < height or bit < depth:
+        for axis, size in enumerate((width, height, depth)):
+            if bit < size:
+                for v in range(size):
+                    if v & bit:
+                        shares[axis][v] |= dest
+                dest <<= 1
+        bit <<= 1
+    return shares
+
+
+def unswizzle_3d(data, width, height, depth, bytes_per_pixel):
+    xs, ys, zs = _morton_bits_3d(width, height, depth)
+    out = bytearray(width * height * depth * bytes_per_pixel)
+    b = bytes_per_pixel
+    for z in range(depth):
+        for y in range(height):
+            row = (z * height + y) * width
+            for x in range(width):
+                src = (xs[x] | ys[y] | zs[z]) * b
+                out[(row + x) * b:(row + x + 1) * b] = data[src:src + b]
+    return bytes(out)
+
+
+def swizzle_3d(data, width, height, depth, bytes_per_pixel):
+    xs, ys, zs = _morton_bits_3d(width, height, depth)
+    out = bytearray(width * height * depth * bytes_per_pixel)
+    b = bytes_per_pixel
+    for z in range(depth):
+        for y in range(height):
+            for x in range(width):
+                src = ((z * height + y) * width + x) * b
+                dst = (xs[x] | ys[y] | zs[z]) * b
+                out[dst:dst + b] = data[src:src + b]
+    return bytes(out)
+
+
 def _morton_bits(width, height):
     xs, ys = [0] * width, [0] * height
     dest, bit = 1, 1
@@ -284,10 +326,29 @@ def convert_image(data, width, height, xbox_format, swizzled, palette=None):
 
 def convert_bitmap(pixels, width, height, depth, kind, flags, mipmap_count, xbox_format, palette=None):
     """A bitmap's pixels (every level, every face) in its GX format, levels one
-    after another, faces within a level one after another: (gx, bytes)."""
-    if kind == TYPE_3D:
-        raise ValueError('3D textures have no GX format (GX draws only 2D ones)')
+    after another, faces within a level one after another: (gx, bytes).
+
+    GX has no 3D textures, so a 3D one's slices are 2D images, one after another
+    in each level, for the renderer to choose between."""
     gx = gx_format_for(xbox_format)
+    swizzled = bool(flags & FLAG_SWIZZLED) and xbox_format not in COMPRESSED
+    if kind == TYPE_3D:
+        out = bytearray()
+        at = 0
+        bpp = BITS_PER_PIXEL[xbox_format]
+        for w, h, d, _, size in mip_levels(width, height, depth, kind, mipmap_count, xbox_format):
+            level = pixels[at:at + size]
+            if len(level) < size:
+                raise ValueError(f'the pixels end {size - len(level)} bytes short of level {w}x{h}x{d}')
+            if swizzled:
+                level = unswizzle_3d(level, w, h, d, bpp // 8)
+            slice_size = size // d
+            for z in range(d):
+                _, converted = convert_image(level[z * slice_size:(z + 1) * slice_size], w, h, xbox_format,
+                                             False, palette)
+                out += converted
+            at += size
+        return gx, bytes(out)
     out = bytearray()
     at = 0
     bpp = BITS_PER_PIXEL[xbox_format]

@@ -104,6 +104,25 @@ class Definitions:
             return definition['width'] // 8
         return definition['size']
 
+    def field_offset(self, struct_name, field_name):
+        """Where a struct's own (or inherited) field starts, whatever it is."""
+        definition = self.types[struct_name]
+        offset = 0
+        if 'inherits' in definition:
+            try:
+                return self.field_offset(definition['inherits'], field_name)
+            except KeyError:
+                offset = self.size(definition['inherits'])
+        for field in definition['fields']:
+            if field.get('name') == field_name:
+                return offset
+            if field['type'] == 'pad':
+                offset += field['size']
+            else:
+                offset += (self.size(field['type']) * field.get('count', 1)
+                           * (2 if field.get('bounds') else 1))
+        raise KeyError(f'{struct_name} has no field {field_name!r}')
+
     def layout(self, name):
         """The struct's fields with every inline struct and inherited struct
         flattened in, each at its offset from the struct's start. Pads and

@@ -51,7 +51,7 @@ class WalkError(ValueError):
 
 # What a plan holds for each byte of the region: nothing, the first byte of a
 # planned word (its width, and whether it is a pointer), or a later byte of one.
-_NONE, _LATER, _WORD2, _WORD4, _POINTER = 0, 1, 2, 4, 5
+_NONE, _LATER, _WORD2, _WORD4, _POINTER, _BITFIELD_2_6 = 0, 1, 2, 4, 5, 6
 
 
 @dataclass
@@ -105,6 +105,24 @@ class Plan:
         self.marks[offset] = mark
         self.marks[offset + 1:offset + width] = b'\1' * (width - 1)
 
+    def bitfield_2_6(self, offset):
+        """A byte that is a C bitfield of 2 bits then 6. MSVC on the Xbox puts
+        the first field in the low bits, and GCC on the PowerPC in the high ones,
+        so the byte is rewritten for the other's layout."""
+        self._inside(offset, 1)
+        planned = self.marks[offset]
+        if planned == _BITFIELD_2_6:
+            return
+        if planned:
+            raise WalkError(f'{offset:x} is planned as {_describe(planned)} and as a bitfield byte')
+        self.marks[offset] = _BITFIELD_2_6
+
+    def bitfields_2_6(self, offset):
+        """The two fields of the bitfield byte at offset, as they are now."""
+        self._inside(offset, 1)
+        b = self.data[offset]
+        return (b & 3, b >> 2) if self.direction.order == LITTLE else (b >> 6, b & 0x3F)
+
     def swap_array(self, offset, width, count):
         for i in range(count):
             self.swap(offset + i * width, width)
@@ -124,7 +142,7 @@ class Plan:
         """(offset, mark) of each planned word."""
         marks = self.marks
         at = -1
-        for mark in (_WORD2, _WORD4, _POINTER):
+        for mark in (_WORD2, _WORD4, _POINTER, _BITFIELD_2_6):
             needle = bytes([mark])
             at = marks.find(needle)
             while at >= 0:
@@ -133,7 +151,7 @@ class Plan:
 
     @property
     def word_count(self):
-        return sum(self.marks.count(m) for m in (_WORD2, _WORD4, _POINTER))
+        return sum(self.marks.count(m) for m in (_WORD2, _WORD4, _POINTER, _BITFIELD_2_6))
 
     @property
     def pointer_count(self):
@@ -149,6 +167,9 @@ class Plan:
                 out[offset], out[offset + 1] = out[offset + 1], out[offset]
             elif mark == _WORD4:
                 out[offset:offset + 4] = self.data[offset:offset + 4][::-1]
+            elif mark == _BITFIELD_2_6:
+                first, second = self.bitfields_2_6(offset)
+                out[offset] = (first << 6 | second) if source == LITTLE else (second << 2 | first)
             else:
                 value = struct.unpack_from(source + 'I', self.data, offset)[0]
                 struct.pack_into(target + 'I', out, offset, rebase(value))
@@ -157,7 +178,7 @@ class Plan:
 
 def _describe(mark):
     return {_NONE: 'nothing', _LATER: 'part of another word', _WORD2: 'a 2-byte number',
-            _WORD4: 'a 4-byte number', _POINTER: 'a pointer'}[mark]
+            _WORD4: 'a 4-byte number', _POINTER: 'a pointer', _BITFIELD_2_6: 'a bitfield byte'}[mark]
 
 
 # ---------- the Halo byte-swap codes (source/memory/byte_swapping.h)

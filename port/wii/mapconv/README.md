@@ -21,8 +21,8 @@ on the disc or expanded, is refused (`--any-build` goes on regardless, unchecked
 
 There is no disc yet, so the check that matters is the round trip on made-up maps
 (`tests/test_roundtrip.py`): `fabricate.py` builds Xbox maps from the definitions,
-with random numbers, blocks, references, data, model and BSP vertex buffers, and BSP
-images, and each goes to the Wii and back, byte for byte. On the way, every number the
+with random numbers, blocks, references, data, model and BSP vertex buffers, BSP
+images, animations (compressed and not) and recorded animation streams (v1 and v4), and each goes to the Wii and back, byte for byte. On the way, every number the
 fabricator wrote must read the same big-endian and every address it wrote must point
 at the same place in the Wii's cache. It runs on a small made-up definition set
 (`tests/fixture_definitions.py`) always, and on all 82 of Invader's groups once
@@ -39,6 +39,9 @@ they are fetched. On a disc, `roundtrip` is the same check on the real maps.
 | the build's map hashes | Halo3DS's `catalog.json` (CC0) |
 | what each texture format's pixels mean, where mipmaps and faces are, the P8 palette | `source/bitmaps/bitmaps.c` |
 | Xbox ADPCM | `port/linux/src/dsound_sdl.c` (64 samples a block, the header's first) |
+| model animation data, compressed or not | the readers in `source/models/model_animations.c` (`streams.py`) |
+| recorded animation streams (v1 and v4) | `source/cutscene/recorded_animation_initialize.c`, `recorded_animation_playback_v1.c`, `recorded_animation_playback.c` |
+| BSP material vertex data | `source/objects/object_lights.c`, `source/structures/structure_lens_flares.c` |
 
 The definitions were checked against Halo3DS's own flattening of them
 (`schemas.json`): all 4,765 of its fields are where this converter puts them, with
@@ -54,11 +57,13 @@ A texture or sound that no longer fits in its old place goes at the end of the f
 ## Open
 
 - **Not run on a real map.** Everything above is checked on made-up data only.
-- Data left in the Xbox's byte order, listed by `roundtrip` and in the report:
-  animation default and frame data (their layout depends on each node's flags, and
-  compressed animations are a bit stream), BSP cluster and sound PAS data, meter
-  stencils, recorded animation streams. Stage 3 finds which of these the engine reads.
-- 3D textures are left as they are (GX has none), and are listed in the report.
+- Every data blob the engine reads is swapped by the layout its reader in the decomp
+  expects; one that does not match that layout is left as it is and listed by
+  `roundtrip` and in the report (`left_in_xbox_order`), so a real map shows at once
+  whether any reader was misread. Data nothing reads (BSP cluster and sound cluster
+  data, meter tags, input device defaults) stays as bytes.
+- 3D textures become their slices, each a 2D GX image; the Xbox's 3D swizzle is
+  taken to be XGSwizzleBox's (x, y, z bits in turn), not checked on real data.
 - The cube map face order and the linear (non-swizzled) bitmaps' row pitch follow
   `bitmaps.c` and are not checked against the Xbox's own GPU layout.
 - The sound converter is pure Python: about 0.1 s per second of audio on one core,

@@ -19,6 +19,7 @@ relocate_cache.py found them by walking every retail map.
 import struct
 from dataclasses import dataclass, field
 
+from . import streams
 from .swap import (Plan, WalkError, HS_DATA_ARRAY_CODES, HS_SYNTAX_NODE_CODES,
                    HS_DATA_ARRAY_SIZE, HS_SYNTAX_NODE_SIZE, byte_swap_codes)
 
@@ -56,6 +57,20 @@ DATA_BYTES = {
 }
 # Data the sound converter rewrites (sound.py); the walk leaves it.
 DATA_CONVERTED = {('SoundPermutation', 'samples')}
+# Data whose struct's rule plans it (streams.py), knowing the struct's other fields.
+DATA_BY_RULE = {
+    ('ModelAnimationsAnimation', 'default data'), ('ModelAnimationsAnimation', 'frame data'),
+    ('ScenarioRecordedAnimation', 'recorded animation event stream'),
+    ('ScenarioStructureBSPMaterial', 'uncompressed vertices'),
+    ('ScenarioStructureBSPMaterial', 'compressed vertices'),
+}
+# Data no code in the decomp reads, left as bytes: BSP cluster and sound
+# cluster data, meter tags (no meter definition in the engine) and input device
+# defaults (input_device_defaults.h is empty).
+DATA_UNREAD = {
+    ('ScenarioStructureBSP', 'cluster data'), ('ScenarioStructureBSP', 'sound pas data'),
+    ('Meter', 'encoded stencil'), ('InputDeviceDefaults', 'device id'), ('InputDeviceDefaults', 'profile'),
+}
 
 
 @dataclass
@@ -147,8 +162,31 @@ def _model_part(walker, offset):
             _struct_array(plan, defs, name, target, vertices)
 
 
+# A BSP material's vertex data (object_lights.c, structure_lens_flares.c): its
+# rendered vertices, then its lightmap vertices.
+MATERIAL_VERTEX_DATA = (
+    (216, 'ScenarioStructureBSPMaterialUncompressedRenderedVertex',
+     'ScenarioStructureBSPMaterialUncompressedLightmapVertex'),
+    (236, 'ScenarioStructureBSPMaterialCompressedRenderedVertex',
+     'ScenarioStructureBSPMaterialCompressedLightmapVertex'),
+)
+
+
 def _bsp_material(walker, offset):
     plan, defs = walker.plan, walker.defs
+    rendered, lightmap = plan.u32(offset + 180), plan.u32(offset + 200)
+    for at, rendered_struct, lightmap_struct in MATERIAL_VERTEX_DATA:
+        data = _data_at(walker, offset + at)
+        if not data:
+            continue
+        r, l = defs.size(rendered_struct), defs.size(lightmap_struct)
+        if data[1] == rendered * r + lightmap * l:
+            _struct_array(plan, defs, rendered_struct, data[0], rendered)
+            _struct_array(plan, defs, lightmap_struct, data[0] + rendered * r, lightmap)
+        elif data[1] == rendered * r:
+            _struct_array(plan, defs, rendered_struct, data[0], rendered)
+        else:
+            plan.left_as_is[f'ScenarioStructureBSPMaterial.{"un" if at == 216 else ""}compressed vertices'] += data[1]
     for start in (176, 196):    # rendered vertices, lightmap vertices
         vertex_type = plan.u16(offset + start)
         vertices = plan.u32(offset + start + 4)
@@ -169,6 +207,51 @@ def _bsp_material(walker, offset):
             _struct_array(plan, defs, name, target, vertices)
 
 
+def _named(walker, struct_name, name):
+    try:
+        return walker.defs.field_offset(struct_name, name)
+    except KeyError as error:
+        raise WalkError(str(error)) from None
+
+
+def _data_at(walker, at):
+    """(offset in the region, size) of the tag data whose header is at, or None."""
+    plan = walker.plan
+    size, address = plan.u32(at), plan.u32(at + 12)
+    if not size or not address:
+        return None
+    return plan.resolve(address, size), size
+
+
+def _animation(walker, offset):
+    plan = walker.plan
+    field = lambda name: offset + _named(walker, 'ModelAnimationsAnimation', name)
+    vector = lambda name: [plan.u32(field(name)), plan.u32(field(name) + 4)]
+    left = streams.plan_animation(plan, {
+        'frame count': plan.u16(field('frame count')), 'frame size': plan.u16(field('frame size')),
+        'node count': plan.u16(field('node count')), 'flags': plan.u16(field('flags')),
+        'translation flags': vector('node transform flag data'),
+        'rotation flags': vector('node rotation flag data'),
+        'scale flags': vector('node scale flag data'),
+        'compressed data offset': plan.u32(field('offset to compressed data')),
+        'default data': _data_at(walker, field('default data')),
+        'frame data': _data_at(walker, field('frame data')),
+    })
+    for name, size in left.items():
+        plan.left_as_is[f'ModelAnimationsAnimation.{name}'] += size
+
+
+def _recorded_animation(walker, offset):
+    plan = walker.plan
+    field = lambda name: offset + _named(walker, 'ScenarioRecordedAnimation', name)
+    stream = _data_at(walker, field('recorded animation event stream'))
+    if stream:
+        left = streams.plan_event_stream(plan, plan.data[field('version')],
+                                         plan.data[field('unit control data version')], *stream)
+        if left:
+            plan.left_as_is['ScenarioRecordedAnimation.recorded animation event stream'] += left
+
+
 def _scenario_bsp(walker, offset):
     plan = walker.plan
     walker.bsps.append((plan.u32(offset), plan.u32(offset + 4), plan.u32(offset + 8)))
@@ -181,6 +264,8 @@ XBOX_RULES = {
     'ModelGeometryPart': ({76, 80, 96, 100}, _model_part),
     'ScenarioStructureBSPMaterial': ({176 + 12, 176 + 16, 196 + 12, 196 + 16}, _bsp_material),
     'ScenarioBSP': ({8}, _scenario_bsp),
+    'ModelAnimationsAnimation': (set(), _animation),
+    'ScenarioRecordedAnimation': (set(), _recorded_animation),
 }
 
 
@@ -286,7 +371,7 @@ class Walker:
             target = plan.pointer(at + 12, size)
             if key in DATA_HANDLERS:
                 DATA_HANDLERS[key](self, target, size)
-            elif key not in DATA_BYTES and size:
+            elif key not in DATA_BYTES and key not in DATA_BY_RULE and key not in DATA_UNREAD and size:
                 plan.left_as_is[f'{f.owner}.{f.name}'] += size
 
 

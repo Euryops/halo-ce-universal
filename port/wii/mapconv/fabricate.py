@@ -9,6 +9,7 @@ not touch (pads, strings) is random too, so a round trip that changed one shows.
 """
 
 import random
+import re
 import struct
 
 from .swap import XBOX_TAG_CACHE, TAG_CACHE_SIZE, WII_TAG_CACHE
@@ -43,6 +44,7 @@ class Region:
         # What was written, for a test to check the swapped map against:
         self.pointers = {}         # offset -> the address there
         self.numbers = {}          # offset -> width, for the definitions' numbers
+        self.bitfields = {}        # offset -> (2-bit field, 6-bit field) of a bitfield byte
     def alloc(self, size, align=4):
         self.buf += bytes((-len(self.buf)) % align)
         at = len(self.buf)
@@ -57,7 +59,8 @@ class Region:
     def put(self, fmt, offset, *values):
         struct.pack_into('<' + fmt, self.buf, offset, *values)
         at = offset
-        for code, value in zip(fmt.replace('4H', 'HHHH'), values):
+        codes = ''.join(code * int(count or 1) for count, code in re.findall(r'(\d*)(\w)', fmt))
+        for code, value in zip(codes, values):
             self.numbers.pop(at, None)
             if isinstance(value, Address):
                 self.pointers[at] = int(value)
@@ -152,7 +155,9 @@ def _model_part(region, at):
 
 
 def _bsp_material(region, at):
+    from .tags import MATERIAL_VERTEX_DATA
     rng = region.rng
+    counts = []
     for start, types in ((176, (0, 1)), (196, (2, 3))):
         vertex_type, vertices = rng.choice(types), rng.randint(0, 5)
         region.put('HH', at + start, vertex_type, 0)
@@ -160,6 +165,19 @@ def _bsp_material(region, at):
         region.put('I', at + start + 12, _harmless(rng))
         data = region.vertices(vertex_type, vertices) if vertices else 0
         region.put('I', at + start + 16, region.address(region.descriptor(data)) if vertices else 0)
+        counts.append(vertices)
+    for offset, rendered, lightmap in MATERIAL_VERTEX_DATA:
+        r, l = region.defs.size(rendered), region.defs.size(lightmap)
+        size = counts[0] * r + (counts[1] * l if rng.random() < .7 else 0)
+        data = region.alloc(size) if size else 0
+        for i in range(counts[0]):
+            for f in region.defs.layout(rendered):
+                region.numbers[data + i * r + f.offset] = f.width
+        if size > counts[0] * r:
+            for i in range(counts[1]):
+                for f in region.defs.layout(lightmap):
+                    region.numbers[data + counts[0] * r + i * l + f.offset] = f.width
+        _data_header(region, at + offset, data, size)
 
 
 def _scenario_bsp(region, at):
@@ -171,16 +189,17 @@ MEDIA_FORMATS = [0, 1, 2, 3, 6, 8, 9, 10, 11, 14, 15, 16, 17]
 
 
 def _media_bitmap(region, at):
-    from .textures import mip_levels, COMPRESSED, FLAG_COMPRESSED, FLAG_SWIZZLED, TYPE_2D, TYPE_CUBE
+    from .textures import mip_levels, COMPRESSED, FLAG_COMPRESSED, FLAG_SWIZZLED, TYPE_2D, TYPE_3D, TYPE_CUBE
     rng = region.rng
     xbox_format = rng.choice(MEDIA_FORMATS)
-    kind = rng.choice((TYPE_2D, TYPE_2D, TYPE_CUBE))
+    kind = rng.choice((TYPE_2D, TYPE_2D, TYPE_CUBE, TYPE_3D))
     width = 1 << rng.randint(2, 5)
     height = width if kind == TYPE_CUBE else 1 << rng.randint(2, 5)
+    depth = 1 << rng.randint(1, 3) if kind == TYPE_3D else 1
     mipmaps = rng.randint(0, 2)
     flags = FLAG_COMPRESSED if xbox_format in COMPRESSED else FLAG_SWIZZLED
-    pixels = rng.randbytes(sum(level[-1] for level in mip_levels(width, height, 1, kind, mipmaps, xbox_format)))
-    region.put('I4H', at, 0x6269746D, width, height, 1, kind)
+    pixels = rng.randbytes(sum(level[-1] for level in mip_levels(width, height, depth, kind, mipmaps, xbox_format)))
+    region.put('I4H', at, 0x6269746D, width, height, depth, kind)
     region.put('HHHHH', at + 12, xbox_format, flags, 0, 0, mipmaps)
     region.put('II', at + 24, 0, len(pixels))
     region.media.append((at + 24, pixels))
@@ -203,11 +222,154 @@ def _media_sound(region, at):
     region.put('H', at + field_offset(region.defs, 'Sound', 'channel count'), region.rng.randint(0, 1))
 
 
+def _numbers(region, at, width, count=1):
+    for i in range(count):
+        region.numbers[at + i * width] = width
+
+
+def _data_header(region, at, target, size):
+    region.put('IIIII', at, size, 0, 0, region.address(target) if size else 0, 0)
+
+
+def _animation(region, at):
+    from .convert import field_offset
+    rng, defs = region.rng, region.defs
+    field = lambda name: at + field_offset(defs, 'ModelAnimationsAnimation', name)
+    nodes = rng.randint(1, 40)
+    rotated, translated, scaled = ([rng.random() < .5 for _ in range(nodes)] for _ in range(3))
+
+    def vector(bits):
+        value = sum(1 << n for n, b in enumerate(bits) if b)
+        return value & 0xFFFFFFFF, value >> 32
+    compressed = rng.random() < .5
+    frames = rng.randint(1, 5)
+    frame_size = sum(8 * r + 12 * t + 4 * c for r, t, c in zip(rotated, translated, scaled))
+    region.put('HH', field('frame count'), frames, frame_size)
+    region.put('H', field('node count'), nodes)
+    region.put('H', field('flags'), int(compressed) | rng.getrandbits(2) << 1)
+    region.put('II', field('node transform flag data'), *vector(translated))
+    region.put('II', field('node rotation flag data'), *vector(rotated))
+    region.put('II', field('node scale flag data'), *vector(scaled))
+
+    default_size = sum(8 * (not r) + 12 * (not t) + 4 * (not c) for r, t, c in zip(rotated, translated, scaled))
+    default = region.alloc(default_size) if default_size else 0
+    cursor = default
+    for r, t, c in zip(rotated, translated, scaled):
+        for animated, width, count in ((r, 2, 4), (t, 4, 3), (c, 4, 1)):
+            if not animated:
+                _numbers(region, cursor, width, count)
+                cursor += width * count
+    _data_header(region, field('default data'), default, default_size)
+
+    uncompressed = frames * frame_size
+    parts = []      # (offset in the compressed block, width, count)
+    if compressed:
+        def keys(count):
+            headers, first = [], 0
+            for _ in range(count):
+                n = rng.randint(0, 3)
+                headers.append(first << 12 | n)
+                first += n
+            return headers, first
+        rotation_headers, rotations = keys(sum(rotated))
+        translation_headers, translations = keys(sum(translated))
+        scale_headers, scales = keys(sum(scaled))
+        layout, at_ = {}, 44 + 4 * len(rotation_headers)
+        for name, width, count in (('translation headers', 4, len(translation_headers)),
+                                   ('scale headers', 4, len(scale_headers)),
+                                   ('rotation indices', 2, rotations), ('default rotations', 2, 3 * nodes),
+                                   ('rotation keys', 2, 3 * rotations), ('translation indices', 2, translations),
+                                   ('default translations', 4, 3 * nodes), ('translation keys', 4, 3 * translations),
+                                   ('scale indices', 2, scales), ('default scales', 4, sum(scaled)),
+                                   ('scale keys', 4, scales)):
+            at_ += (-at_) % width
+            layout[name] = at_
+            parts.append((at_, width, count))
+            at_ += width * count
+        block = at_
+    data = region.alloc(uncompressed + (block if compressed else 0))
+    cursor = data
+    for _ in range(frames):
+        for r, t, c in zip(rotated, translated, scaled):
+            for animated, width, count in ((r, 2, 4), (t, 4, 3), (c, 4, 1)):
+                if animated:
+                    _numbers(region, cursor, width, count)
+                    cursor += width * count
+    if compressed:
+        base = data + uncompressed
+        offsets = [layout[n] for n in ('rotation indices', 'default rotations', 'rotation keys',
+                                       'translation headers', 'translation indices', 'default translations',
+                                       'translation keys', 'scale headers', 'scale indices', 'default scales',
+                                       'scale keys')]
+        region.put('11I', base, *offsets)
+        region.put(f'{len(rotation_headers)}I', base + 44, *rotation_headers)
+        region.put(f'{len(translation_headers)}I', base + layout['translation headers'], *translation_headers)
+        region.put(f'{len(scale_headers)}I', base + layout['scale headers'], *scale_headers)
+        _numbers(region, base, 4, 11 + len(rotation_headers))
+        for offset, width, count in parts:
+            _numbers(region, base + offset, width, count)
+    region.put('I', field('offset to compressed data'), uncompressed if compressed else 0)
+    _data_header(region, field('frame data'), data, uncompressed + (block if compressed else 0))
+
+
+def _recorded_animation(region, at):
+    from .convert import field_offset
+    from . import streams
+    rng, defs = region.rng, region.defs
+    field = lambda name: at + field_offset(defs, 'ScenarioRecordedAnimation', name)
+    version, control_version = rng.randint(1, 4), rng.randint(0, 4)
+    region.buf[field('version')] = version
+    region.buf[field('unit control data version')] = control_version
+    control_size, control = streams.unit_control_layout(control_version)
+    events = []
+    if version < 4:
+        for _ in range(rng.randint(0, 8)):
+            events.append(rng.choice([k for k in streams.V1_EVENTS if k != streams.V1_END]))
+        size = control_size + sum(streams.V1_EVENTS[k][0] for k in events) + 4
+    else:
+        for _ in range(rng.randint(0, 8)):
+            events.append((rng.randint(0, 3), rng.choice([k for k in streams.V4_EVENTS if k != streams.V4_END])))
+        size = control_size + streams.ANIMATION_STATE_SIZE + 1 + sum(
+            1 + (delta - 1 if delta > 1 else 0) + sum(n for n, _ in streams.V4_EVENTS[k]) for delta, k in events)
+    stream = region.alloc(size)
+    for offset, width in control:
+        _numbers(region, stream + offset, width)
+    cursor = stream + control_size
+    if version < 4:
+        for kind in events + [streams.V1_END]:
+            length, fields = streams.V1_EVENTS[kind]
+            region.put('H', cursor, kind)
+            _numbers(region, cursor, 2, 2)
+            for offset, width in fields:
+                _numbers(region, cursor + offset, width)
+            cursor += length
+    else:
+        _numbers(region, cursor, 2, streams.ANIMATION_STATE_SIZE // 2)
+        cursor += streams.ANIMATION_STATE_SIZE
+        for delta, kind in events + [(0, streams.V4_END)]:
+            region.buf[cursor] = kind << 2 | delta
+            region.bitfields[cursor] = (delta, kind)
+            cursor += 1
+            if delta == 2:
+                cursor += 1
+            elif delta == 3:
+                _numbers(region, cursor, 2)
+                cursor += 2
+            for length, width in streams.V4_EVENTS[kind] if kind != streams.V4_END else ():
+                if width:
+                    _numbers(region, cursor, width)
+                cursor += length
+    assert cursor == stream + size
+    _data_header(region, field('recorded animation event stream'), stream, size)
+
+
 FABRICATE_RULES = {
     'BitmapData': _bitmap_data,
     'ModelGeometryPart': _model_part,
     'ScenarioStructureBSPMaterial': _bsp_material,
     'ScenarioBSP': _scenario_bsp,
+    'ModelAnimationsAnimation': _animation,
+    'ScenarioRecordedAnimation': _recorded_animation,
 }
 
 

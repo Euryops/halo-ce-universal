@@ -117,9 +117,29 @@ class Textures(unittest.TestCase):
         for fmt in (t.A8, t.Y8, t.AY8, t.A8Y8, t.R5G6B5, t.A1R5G5B5, t.A4R4G4B4, t.DXT3, t.DXT5):
             self.assertEqual(t.gx_format_for(fmt), t.GX_RGB5A3)
 
-    def test_3d_textures_are_refused(self):
-        with self.assertRaises(ValueError):
-            t.convert_bitmap(bytes(1024), 8, 8, 2, t.TYPE_3D, 0, 0, t.A8R8G8B8)
+    def test_3d_swizzle_and_unswizzle_are_inverse(self):
+        for w, h, d in ((4, 4, 4), (8, 4, 2), (4, 8, 16), (2, 2, 1)):
+            data = self.rng.randbytes(w * h * d)
+            self.assertEqual(t.unswizzle_3d(t.swizzle_3d(data, w, h, d, 1), w, h, d, 1), data)
+        # With depth 1 it is the 2D swizzle.
+        data = self.rng.randbytes(64)
+        self.assertEqual(t.swizzle_3d(data, 8, 8, 1, 1), t.swizzle(data, 8, 8, 1))
+
+    def test_3d_textures_become_their_slices(self):
+        w = h = 8
+        d = 4
+        slices = [bytes([z * 60]) * (w * h * 4) for z in range(d)]
+        linear = b''.join(slices)
+        gx, out = t.convert_bitmap(t.swizzle_3d(linear, w, h, d, 4), w, h, d, t.TYPE_3D, t.FLAG_SWIZZLED,
+                                   0, t.A8R8G8B8)
+        size = t.gx_size(gx, w, h)
+        self.assertEqual(len(out), size * d)
+        for z in range(d):
+            self.assertEqual(out[z * size:(z + 1) * size], t.encode_rgba8([(z * 60,) * 4] * (w * h), w, h))
+        levels = t.mip_levels(16, 16, 8, t.TYPE_3D, 2, t.DXT1)
+        pixels = self.rng.randbytes(sum(lvl[-1] for lvl in levels))
+        gx, out = t.convert_bitmap(pixels, 16, 16, 8, t.TYPE_3D, t.FLAG_COMPRESSED, 2, t.DXT1)
+        self.assertEqual(len(out), sum(t.gx_size(gx, w, h) * d for w, h, d, _, _ in levels))
 
 
 if __name__ == '__main__':

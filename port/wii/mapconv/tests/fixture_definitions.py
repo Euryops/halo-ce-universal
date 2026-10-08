@@ -38,8 +38,13 @@ TYPES = [
     ]),
     struct('ScenarioBSP', 32, [f('bsp start', 'uint32'), f('bsp size', 'uint32'), f('bsp address', 'uint32'),
                                pad(4), f('structure bsp', 'TagDependency')]),
-    struct('Scenario', 120, [
+    struct('ScenarioRecordedAnimation', 64, [
+        f('name', 'TagString'), f('version', 'int8'), f('raw animation data', 'int8'),
+        f('unit control data version', 'int8'), pad(1), f('length of animation', 'int16'), pad(6),
+        f('recorded animation event stream', 'TagDataOffset')]),
+    struct('Scenario', 132, [
         f('sky', 'TagDependency'), f('structure bsps', 'TagReflexive', struct='ScenarioBSP'),
+        f('recorded animations', 'TagReflexive', struct='ScenarioRecordedAnimation'),
         f('script syntax data', 'TagDataOffset'), f('script string data', 'TagDataOffset'),
         f('things', 'TagReflexive', struct='ScenarioThing'), f('unknown data', 'TagDataOffset'),
         f('plane', 'Plane3D'), pad(4),
@@ -108,6 +113,16 @@ TYPES = [
         f('channel count', 'ThingKind'), f('format', 'SoundFormat'), f('promotion sound', 'TagDependency'),
         f('pitch ranges', 'TagReflexive', struct='SoundPitchRange')], **{'class': 'sound'}),
 
+    {'name': 'AnimationFlags', 'type': 'bitfield', 'fields': ['compressed data'], 'width': 16},
+    struct('ModelAnimationsAnimation', 132, [
+        f('name', 'TagString'), f('frame count', 'uint16'), f('frame size', 'uint16'),
+        f('node count', 'uint16'), f('flags', 'AnimationFlags'), f('weight', 'Fraction'),
+        f('frame info', 'TagDataOffset'), f('node transform flag data', 'uint32', count=2),
+        f('node rotation flag data', 'uint32', count=2), f('node scale flag data', 'uint32', count=2),
+        f('offset to compressed data', 'uint32'), f('default data', 'TagDataOffset'),
+        f('frame data', 'TagDataOffset')]),
+    struct('ModelAnimations', 12, [f('animations', 'TagReflexive', struct='ModelAnimationsAnimation')],
+           **{'class': 'model_animations'}),
     struct('UnicodeStringListString', 20, [f('string', 'TagDataOffset')]),
     struct('UnicodeStringList', 12, [f('strings', 'TagReflexive', struct='UnicodeStringListString')],
            **{'class': 'unicode_string_list'}),
@@ -128,6 +143,7 @@ FOURCC = """
         TAG_FOURCC_UNICODE_STRING_LIST = 0x75737472,
         TAG_FOURCC_OBJECT = 0x6F626A65,
         TAG_FOURCC_UNIT = 0x756E6974,
+        TAG_FOURCC_MODEL_ANIMATIONS = 0x616E7472,
 """
 
 

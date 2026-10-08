@@ -32,6 +32,8 @@ class RoundTrip(unittest.TestCase):
                 code = 'H' if width == 2 else 'I'
                 self.assertEqual(struct.unpack_from('>' + code, wii.data, file_offset + at),
                                  struct.unpack_from('<' + code, xbox, file_offset + at), f'number at {at:x}')
+            for at, (first, second) in region.bitfields.items():
+                self.assertEqual(wii.data[file_offset + at], first << 6 | second, f'bitfield at {at:x}')
         header = Header.parse(wii.data, '>')
         header.check()
         self.assertEqual((header.name, header.build), ('madeup', '01.10.12.2276'))
@@ -53,6 +55,7 @@ class RoundTrip(unittest.TestCase):
             wii = self.check(defs, seed, max_depth=4, max_count=4)
             counts |= set(wii.tags.plan.counts) | {n for b in wii.bsps for n in b.plan.counts}
         for name in ('Scenario', 'ScenarioThing', 'ScenarioBSP', 'ScenarioStructureBSPMaterial',
+                     'ModelAnimationsAnimation', 'ScenarioRecordedAnimation',
                      'ModelGeometryPart', 'BitmapData', 'SoundPermutation', 'Unit', 'ObjectAttachment'):
             self.assertIn(name, counts)
 
@@ -64,6 +67,14 @@ class RoundTrip(unittest.TestCase):
                 wii = self.check(defs, seed, media=seed % 2 == 1)
                 walked = set(wii.tags.plan.counts)
                 self.assertTrue({defs.roots[g] for g in defs.roots} - {'ScenarioStructureBSP'} <= walked)
+
+    def test_nothing_the_engine_reads_is_left_unswapped(self):
+        for defs in (support.fixture(), support.invader()):
+            for seed in range(10):
+                wii = self.check(defs, seed)
+                left = wii.summary()['left_in_xbox_order']
+                left.pop('Scenario.unknown data', None)     # the fixture's own, to be reported
+                self.assertEqual(left, {}, seed)
 
     def test_a_map_already_swapped_is_refused(self):
         defs = support.fixture()

@@ -27,10 +27,7 @@ BITMAP, SOUND = 0x6269746D, 0x736E6421   # 'bitm', 'snd!'
 
 
 def field_offset(defs, struct_name, name):
-    for f in defs.layout(struct_name):
-        if f.owner == struct_name and f.name == name:
-            return f.offset
-    raise KeyError(f'{struct_name} has no field {name!r}')
+    return defs.field_offset(struct_name, name)
 
 
 @dataclass
