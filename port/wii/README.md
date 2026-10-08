@@ -4,7 +4,12 @@
 for powerpc-eabi gcc (devkitPPC): no x86 guard, gcc inline rules, 16-bit `wchar_t`,
 `__int64` and the x86 calling conventions defined away.
 
-`ppc-syntax-check.sh` syntax-checks every game unit with it. At `a3fa6eec` it passes
-470 of 498 units. Run it in `devkitpro/devkitppc` with the repo at `/src`, the header
-copied to `build/ppc/prefix.h`, `build/ppc/sem.h` from `tools/linux_msvc_semantics.py`,
-`build/ppc/files.txt` (the units) and `/incs.txt` (the `-I` list from `port/linux/port.json`).
+## Run the check
+
+On the box (or any machine with docker and `docker pull devkitpro/devkitppc`), from the repo root:
+
+    ./port/wii/check.sh
+
+It writes the inputs under `build/ppc/` (git-ignored), runs `ppc-syntax-check.sh` in the
+devkitPPC image and prints `470 OK, 28 FAIL` at `a3fa6eec`. The failing units, with their
+first errors, are in `build/ppc/result.txt`.
