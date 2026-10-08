@@ -96,7 +96,9 @@ enum { PART_RGB, PART_ALPHA };
 #define MAXIMUM_OPERATIONS 128
 #define MAXIMUM_SLOTS 192
 #define MAXIMUM_VALUES 160
-#define MAXIMUM_CONSTANTS 24
+#define MAXIMUM_CONSTANTS 48
+#define MAXIMUM_COPIES 48
+#define MAXIMUM_SUMS 48
 #define MAXIMUM_TERMS 24
 #define NONE (-1)
 
@@ -157,6 +159,9 @@ enum
 	VALUE_FOG_FACTOR,
 	/* computed, in a slot */
 	VALUE_SLOT,
+	/* the same as an operand (alias): a texture's or color's channel, or
+	all three of its colors */
+	VALUE_OPERAND,
 };
 
 /* what an NV2A register's rgb or alpha holds */
@@ -170,6 +175,7 @@ struct value
 	uint8_t scalar;
 	short index;
 	short slot;
+	struct operand alias;
 	float minimum, maximum;
 	/* the slot clamped to [0, 1], for unsigned reads of a biased value, in
 	each pipe */
@@ -222,6 +228,28 @@ struct compiler
 	int constant_count;
 	struct nv2a_tev_constant constants[MAXIMUM_CONSTANTS];
 	short constant_register[MAXIMUM_CONSTANTS];
+	/* the constants given constant registers so far */
+	int konst_count;
+	short konst_used[4];
+	/* constants an operation cannot take beside its others go in registers'
+	initial values (else they are copied by an operation) */
+	int constant_registers;
+	/* sums already computed */
+	int sum_count;
+	struct
+	{
+		uint8_t pipe, clamp;
+		short slot;
+		struct sum sum;
+	} sums[MAXIMUM_SUMS];
+	/* operands already copied to a register */
+	int copy_count;
+	struct
+	{
+		uint8_t pipe;
+		struct operand input;
+		short slot;
+	} copies[MAXIMUM_COPIES];
 
 	int stage_count;
 	/* the registers as each stage saw them, before it (stage_count + 1 for
@@ -264,16 +292,18 @@ static int constant_index(struct compiler *compiler, int source, int index, cons
 	{
 		const struct nv2a_tev_constant *existing = &compiler->constants[constant];
 
-		if (existing->source == source && existing->index == index &&
-			(source != _nv2a_constant_literal || !memcmp(existing->value, value, 4)))
+		if (existing->source == source && existing->index == index && existing->lane == LANE_RGB &&
+			!existing->invert && (source != _nv2a_constant_literal || !memcmp(existing->value, value, 4)))
 		{
 			return constant;
 		}
 	}
 	if (compiler->constant_count == MAXIMUM_CONSTANTS)
 		return fail(compiler, "too many constants");
+	memset(&compiler->constants[constant], 0, sizeof(compiler->constants[constant]));
 	compiler->constants[constant].source = (uint8_t)source;
 	compiler->constants[constant].index = (uint8_t)index;
+	compiler->constants[constant].lane = LANE_RGB;
 	if (value)
 		memcpy(compiler->constants[constant].value, value, 4);
 	compiler->constant_register[constant] = NONE;
@@ -365,7 +395,7 @@ static int lane_need(int pipe, const struct operand *input)
 	if (input->kind != OPERAND_TEXTURE && input->kind != OPERAND_COLOR)
 		return NONE;
 	if (pipe == PIPE_COLOR)
-		return input->lane == LANE_A ? LANE_A : NONE;
+		return input->lane == LANE_RGB ? NONE : input->lane;
 	return input->lane == LANE_RGB ? LANE_A : input->lane;
 }
 
@@ -416,24 +446,81 @@ static int operation_append(struct compiler *compiler, int pipe, const struct op
 static int operation(struct compiler *compiler, int pipe, struct operand a, struct operand b, struct operand c,
 	struct operand d, int op, int bias, int scale, int clamp);
 
-/* the operand, alone, in a register of the pipe */
+/* the operand, alone, in a register of the pipe: a constant as the
+register's initial value, anything else by an operation; once for each
+operand */
 static struct operand copied(struct compiler *compiler, int pipe, struct operand input)
 {
 	struct operand zero = operand(OPERAND_ZERO, 0, LANE_RGB);
-	int slot;
+	int slot, index;
 
-	if (input.complement)
+	for (index = 0; index < compiler->copy_count; index++)
+	{
+		const struct operand *seen = &compiler->copies[index].input;
+
+		if (compiler->copies[index].pipe == pipe && seen->kind == input.kind && seen->index == input.index &&
+			seen->lane == input.lane && seen->complement == input.complement)
+		{
+			return operand(OPERAND_SLOT, compiler->copies[index].slot, LANE_RGB);
+		}
+	}
+	if (compiler->constant_registers && (input.kind == OPERAND_CONSTANT || input.kind == OPERAND_FRACTION ||
+		input.kind == OPERAND_ONE || input.kind == OPERAND_HALF))
+	{
+		struct nv2a_tev_constant constant;
+		int constant_slot;
+
+		memset(&constant, 0, sizeof(constant));
+		if (input.kind == OPERAND_CONSTANT)
+		{
+			constant = compiler->constants[input.index];
+			constant.lane = pipe == PIPE_ALPHA && input.lane == LANE_RGB ? LANE_A : input.lane;
+		}
+		else
+		{
+			static const uint8_t fractions[8] = { 255, 223, 191, 159, 128, 96, 64, 32 };
+			uint8_t byte = input.kind == OPERAND_ONE ? 255 : input.kind == OPERAND_HALF ? 128 : fractions[input.index & 7];
+
+			constant.source = _nv2a_constant_literal;
+			memset(constant.value, byte, 4);
+			constant.lane = LANE_RGB;
+		}
+		constant.invert = input.complement;
+		if (compiler->constant_count == MAXIMUM_CONSTANTS)
+		{
+			fail(compiler, "too many constants");
+			return zero;
+		}
+		compiler->constants[compiler->constant_count] = constant;
+		compiler->constant_register[compiler->constant_count] = NONE;
+		constant_slot = new_slot(compiler, pipe);
+		if (constant_slot == NONE)
+			return zero;
+		compiler->slots[constant_slot].constant = (short)compiler->constant_count++;
+		slot = constant_slot;
+	}
+	else if (input.complement)
 	{
 		/* 1 - x: lerp(1, 0, x) */
-		input.complement = 0;
-		slot = operation(compiler, pipe, operand(OPERAND_ONE, 0, LANE_RGB), zero, input, zero,
+		struct operand plain = input;
+
+		plain.complement = 0;
+		slot = operation(compiler, pipe, operand(OPERAND_ONE, 0, LANE_RGB), zero, plain, zero,
 			TEV_ADD, TB_ZERO, CS_SCALE_1, 0);
 	}
 	else
 	{
 		slot = operation(compiler, pipe, zero, zero, zero, input, TEV_ADD, TB_ZERO, CS_SCALE_1, 0);
 	}
-	return slot == NONE ? zero : operand(OPERAND_SLOT, slot, LANE_RGB);
+	if (slot == NONE)
+		return zero;
+	if (compiler->copy_count < MAXIMUM_COPIES)
+	{
+		compiler->copies[compiler->copy_count].pipe = (uint8_t)pipe;
+		compiler->copies[compiler->copy_count].input = input;
+		compiler->copies[compiler->copy_count++].slot = (short)slot;
+	}
+	return operand(OPERAND_SLOT, slot, LANE_RGB);
 }
 
 /* an operation, its inputs made fit for one stage first: no inverted a or
@@ -452,6 +539,18 @@ static int operation(struct compiler *compiler, int pipe, struct operand a, stru
 	{
 		if (inputs[index].complement)
 			inputs[index] = copied(compiler, pipe, inputs[index]);
+		/* a fifth constant goes in a register's initial value */
+		if (inputs[index].kind == OPERAND_CONSTANT && compiler->constant_registers)
+		{
+			int k;
+
+			for (k = 0; k < compiler->konst_count && compiler->konst_used[k] != inputs[index].index; k++)
+				;
+			if (k == compiler->konst_count && k < 4)
+				compiler->konst_used[compiler->konst_count++] = inputs[index].index;
+			else if (k == compiler->konst_count)
+				inputs[index] = copied(compiler, pipe, inputs[index]);
+		}
 	}
 	for (index = 1; index < 4; index++)
 	{
@@ -536,6 +635,11 @@ static int read_value(struct compiler *compiler, int value_index, int pipe, int 
 	case VALUE_FOG_FACTOR:
 		compiler->program->fog_texture = 1;
 		*result = operand(OPERAND_TEXTURE, NV2A_TEV_FOG_TEXTURE, LANE_A);
+		return 1;
+	case VALUE_OPERAND:
+		*result = value->alias;
+		if (result->lane == LANE_RGB)
+			result->lane = (uint8_t)lane;
 		return 1;
 	case VALUE_SLOT:
 		if (compiler->slots[value->slot].pipe == PIPE_ALPHA || pipe == PIPE_COLOR)
@@ -731,6 +835,11 @@ static int add_term(struct compiler *compiler, struct sum *sum, float weight, st
 		b = swap;
 		c.complement = 0;
 	}
+	/* 1 - 0 is 1 */
+	if (a.kind == OPERAND_ZERO && a.complement)
+		a = operand(OPERAND_ONE, 0, LANE_RGB);
+	if (b.kind == OPERAND_ZERO && b.complement)
+		b = operand(OPERAND_ONE, 0, LANE_RGB);
 	term = &sum->terms[sum->term_count++];
 	term->sign = (int8_t)(weight < 0.0f ? -1 : 1);
 	term->exponent = (int8_t)exponent;
@@ -808,6 +917,12 @@ static int add_factors(struct compiler *compiler, struct sum *sum, float weight,
 		struct operand inverted = g->atom;
 		float w = weight * f->scale * g->scale / 4.0f;
 
+		/* a square: (2x-1)^2 = 1 - 4x(1-x), and x(1-x) = lerp(x, 0, x) */
+		if (f->atom.kind == g->atom.kind && f->atom.index == g->atom.index && f->atom.lane == g->atom.lane)
+		{
+			sum->constant += w;
+			return add_term(compiler, sum, -4.0f * w, f->atom, zero_operand(), f->atom);
+		}
 		inverted.complement = 1;
 		sum->constant -= w;
 		return add_term(compiler, sum, 2.0f * w, inverted, g->atom, f->atom);
@@ -865,7 +980,109 @@ struct step
 
 /* the sum computed in a chain of operations in the pipe; its last one
 clamps if asked. The slot of the result, or NONE */
+static int sum_compute_new(struct compiler *compiler, int pipe, struct sum *sum, int clamp);
+
+/* a sum computed once: the same sum in the same pipe again is the same slot */
 static int sum_compute(struct compiler *compiler, int pipe, struct sum *sum, int clamp)
+{
+	int index, slot;
+	struct sum key;
+
+	memset(&key, 0, sizeof(key));
+	key.term_count = sum->term_count;
+	memcpy(key.terms, sum->terms, sum->term_count * sizeof(sum->terms[0]));
+	key.constant = sum->constant;
+	for (index = 0; index < compiler->sum_count; index++)
+	{
+		if (compiler->sums[index].pipe == pipe && compiler->sums[index].clamp == clamp &&
+			!memcmp(&compiler->sums[index].sum, &key, sizeof(key)))
+		{
+			return compiler->sums[index].slot;
+		}
+	}
+	slot = sum_compute_new(compiler, pipe, sum, clamp);
+	if (slot != NONE && compiler->sum_count < MAXIMUM_SUMS)
+	{
+		compiler->sums[compiler->sum_count].pipe = (uint8_t)pipe;
+		compiler->sums[compiler->sum_count].clamp = (uint8_t)clamp;
+		compiler->sums[compiler->sum_count].sum = key;
+		compiler->sums[compiler->sum_count++].slot = (short)slot;
+	}
+	return slot;
+}
+
+static int same_operand(const struct operand *a, const struct operand *b)
+{
+	return a->kind == b->kind && a->index == b->index && a->lane == b->lane && a->complement == b->complement;
+}
+
+/* a pure product's two factors the other way round, if the one to be c can
+be (not inverted) */
+static int swap_product(struct term *term)
+{
+	struct operand swap;
+
+	if (term->a.kind != OPERAND_ZERO || term->a.complement || term->b.complement)
+		return 0;
+	swap = term->b;
+	term->b = term->c;
+	term->c = swap;
+	return 1;
+}
+
+/* two terms that are one: the same lerp twice (twice the weight), or two of
+the same weight that share their c, one with a zero b and the other a zero a,
+which are one lerp: x*(1-c) + y*c. A product may be turned round for it */
+static void merge_terms(struct sum *sum)
+{
+	int i, j, turn;
+
+	for (i = 0; i < sum->term_count; i++)
+	{
+		for (j = i + 1; j < sum->term_count; j++)
+		{
+			struct term *x = &sum->terms[i], *y = &sum->terms[j];
+			int merged = 0;
+
+			if (x->sign != y->sign || x->exponent != y->exponent)
+				continue;
+			for (turn = 0; turn < 4 && !merged; turn++)
+			{
+				if (turn == 1 && !swap_product(x))
+					continue;
+				if (turn == 2 && !swap_product(y))
+					continue;
+				if (turn == 3 && !swap_product(x))
+					continue;
+				if (!same_operand(&x->c, &y->c))
+					continue;
+				if (same_operand(&x->a, &y->a) && same_operand(&x->b, &y->b))
+				{
+					x->exponent++;
+					merged = 1;
+				}
+				else if (x->b.kind == OPERAND_ZERO && !x->b.complement && y->a.kind == OPERAND_ZERO && !y->a.complement)
+				{
+					x->b = y->b;
+					merged = 1;
+				}
+				else if (x->a.kind == OPERAND_ZERO && !x->a.complement && y->b.kind == OPERAND_ZERO && !y->b.complement)
+				{
+					x->a = y->a;
+					merged = 1;
+				}
+			}
+			if (!merged)
+				continue;
+			sum->terms[j] = sum->terms[--sum->term_count];
+			/* again from the start: the merged term may merge further */
+			i = -1;
+			break;
+		}
+	}
+}
+
+static int sum_compute_new(struct compiler *compiler, int pipe, struct sum *sum, int clamp)
 {
 	struct step steps[MAXIMUM_TERMS * 3];
 	int order[MAXIMUM_TERMS];
@@ -873,6 +1090,7 @@ static int sum_compute(struct compiler *compiler, int pipe, struct sum *sum, int
 	struct operand d = zero_operand();
 	int slot = NONE;
 
+	merge_terms(sum);
 	/* a single input weighted a half, a quarter or an eighth takes its weight
 	from one of GX's fractions, where the lerp's 1 is, rather than from a
 	halving of the whole chain at its end, which would leave the steps before
@@ -961,7 +1179,8 @@ static int sum_compute(struct compiler *compiler, int pipe, struct sum *sum, int
 			return fail(compiler, "internal: a constant that does not fit");
 		{
 			float magnitude = fabsf(sum->constant);
-			int exponent = (int)ceilf(log2f(magnitude));
+			/* at most 1: the number itself, weighed 1 */
+			int exponent = magnitude <= 1.0f ? 0 : (int)ceilf(log2f(magnitude));
 
 			if (!add_single(compiler, sum, (sum->constant < 0.0f ? -1.0f : 1.0f) * ldexpf(1.0f, exponent),
 				number_operand(compiler, ldexpf(magnitude, -exponent))))
@@ -1222,10 +1441,51 @@ static int store_sum(struct compiler *compiler, struct sum *sum, uint32_t flags,
 		value->minimum = 0.0f;
 	}
 	value->biased = (uint8_t)(biased != 0);
+	/* nothing to compute: zero, or one input as it is */
+	if (!biased && fabsf(sum->constant) < 1.0e-6f &&
+		(sum->term_count == 0 || (sum->term_count == 1 && sum->terms[0].sign > 0 && sum->terms[0].exponent == 0 &&
+		sum->terms[0].a.kind == OPERAND_ZERO && sum->terms[0].c.kind == OPERAND_ONE && !sum->terms[0].b.complement)))
+	{
+		struct operand alias = sum->term_count ? sum->terms[0].b : zero_operand();
+
+		if (alias.kind == OPERAND_SLOT)
+		{
+			value->kind = VALUE_SLOT;
+			value->slot = alias.index;
+			return 1;
+		}
+		if (alias.kind == OPERAND_TEXTURE || alias.kind == OPERAND_COLOR || alias.kind == OPERAND_ZERO ||
+			alias.kind == OPERAND_ONE)
+		{
+			value->kind = alias.kind == OPERAND_ZERO ? VALUE_ZERO : VALUE_OPERAND;
+			value->alias = alias;
+			value->slot = NONE;
+			return 1;
+		}
+	}
 	slot = sum_compute(compiler, pipe, sum, 1);
 	value->slot = (short)slot;
 	value->kind = VALUE_SLOT;
 	return slot != NONE;
+}
+
+/* where store_sum left a value, as an operand of the pipe that made it */
+static struct operand held(const struct value *value, int lane)
+{
+	struct operand result;
+
+	switch (value->kind)
+	{
+	case VALUE_SLOT:
+		return operand(OPERAND_SLOT, value->slot, LANE_RGB);
+	case VALUE_OPERAND:
+		result = value->alias;
+		if (result.lane == LANE_RGB)
+			result.lane = (uint8_t)lane;
+		return result;
+	default:
+		return zero_operand();
+	}
 }
 
 /* a multiplexed sum: r0's alpha (its top bit) picks CD over AB. The output
@@ -1264,13 +1524,12 @@ static int multiplexed(struct compiler *compiler, int stage, int alpha, int pipe
 		return 0;
 	/* (r0.a > 127 ? CD : 0) + (128 > r0.a ? AB : 0) */
 	half = number_operand(compiler, 127.0f / 255.0f);
-	slot = operation(compiler, pipe, condition, half, operand(OPERAND_SLOT, parts[1].slot, LANE_RGB), zero,
-		compare, TB_ZERO, CS_SCALE_1, 0);
+	slot = operation(compiler, pipe, condition, half, held(&parts[1], lane), zero, compare, TB_ZERO, CS_SCALE_1, 0);
 	if (slot == NONE)
 		return 0;
 	half = pipe == PIPE_COLOR ? operand(OPERAND_HALF, 0, LANE_RGB) : number_operand(compiler, 128.0f / 255.0f);
-	slot = operation(compiler, pipe, half, condition, operand(OPERAND_SLOT, parts[0].slot, LANE_RGB),
-		operand(OPERAND_SLOT, slot, LANE_RGB), compare, TB_ZERO, CS_SCALE_1, 0);
+	slot = operation(compiler, pipe, half, condition, held(&parts[0], lane), operand(OPERAND_SLOT, slot, LANE_RGB),
+		compare, TB_ZERO, CS_SCALE_1, 0);
 	if (slot == NONE)
 		return 0;
 	value->kind = VALUE_SLOT;
@@ -1316,11 +1575,16 @@ static int portion_output(struct compiler *compiler, int stage, int alpha, int o
 	{
 		struct value *value = &compiler->values[value_index];
 
+		value->kind = result.kind;
+		value->alias = result.alias;
 		value->slot = result.slot;
 		value->biased = result.biased;
 		value->minimum = result.minimum;
 		value->maximum = result.maximum;
-		value->scalar = (uint8_t)scalar;
+		/* scalar: so made, or the same as a channel or a scalar in the alpha pipe */
+		value->scalar = (uint8_t)(scalar ||
+			(result.kind == VALUE_OPERAND && (result.alias.lane != LANE_RGB || result.alias.kind == OPERAND_ONE)) ||
+			(result.kind == VALUE_SLOT && compiler->slots[result.slot].pipe == PIPE_ALPHA));
 		value->stage = (short)stage;
 		value->output = (uint8_t)output;
 	}
@@ -1548,13 +1812,37 @@ static int final_value(struct compiler *compiler, int which, int pipe, int lane)
 			return NONE;
 		}
 	}
-	slot = sum_compute(compiler, pipe, &sum, 1);
-	if (slot == NONE)
-		return NONE;
 	value_index = new_value(compiler, VALUE_SLOT, pipe == PIPE_ALPHA ? PART_ALPHA : PART_RGB, 0);
 	if (value_index == NONE)
 		return NONE;
 	value = &compiler->values[value_index];
+	if (sum.term_count == 0 && sum.constant == 0.0f)
+	{
+		value->kind = VALUE_ZERO;
+		slot = NONE;
+	}
+	else if (sum.term_count == 1 && sum.constant == 0.0f && sum.terms[0].sign > 0 && sum.terms[0].exponent == 0 &&
+		sum.terms[0].a.kind == OPERAND_ZERO && sum.terms[0].c.kind == OPERAND_ONE && !sum.terms[0].b.complement &&
+		sum.terms[0].b.kind != OPERAND_CONSTANT && sum.terms[0].b.kind != OPERAND_FRACTION)
+	{
+		/* one input as it is */
+		if (sum.terms[0].b.kind == OPERAND_SLOT)
+		{
+			slot = sum.terms[0].b.index;
+		}
+		else
+		{
+			value->kind = VALUE_OPERAND;
+			value->alias = sum.terms[0].b;
+			slot = NONE;
+		}
+	}
+	else
+	{
+		slot = sum_compute(compiler, pipe, &sum, 1);
+		if (slot == NONE)
+			return NONE;
+	}
 	value->slot = (short)slot;
 	value->stage = (short)compiler->stage_count;
 	value->output = (uint8_t)which;
@@ -1566,7 +1854,8 @@ static int final_value(struct compiler *compiler, int which, int pipe, int lane)
 /* the result into PREV: one pipe's final sum */
 static int final_result(struct compiler *compiler, int pipe, struct sum *sum)
 {
-	int slot = sum_compute(compiler, pipe, sum, 1);
+	/* (its own slot, which ends in PREV) */
+	int slot = sum_compute_new(compiler, pipe, sum, 1);
 
 	if (slot == NONE)
 		return 0;
@@ -1864,8 +2153,8 @@ static uint8_t color_input(struct compiler *compiler, const struct operand *inpu
 	case OPERAND_ZERO: return CC_ZERO;
 	case OPERAND_ONE: return CC_ONE;
 	case OPERAND_HALF: return CC_HALF;
-	case OPERAND_TEXTURE: return input->lane == LANE_A ? CC_TEXA : CC_TEXC;
-	case OPERAND_COLOR: return input->lane == LANE_A ? CC_RASA : CC_RASC;
+	case OPERAND_TEXTURE: return input->lane == LANE_RGB ? CC_TEXC : CC_TEXA;
+	case OPERAND_COLOR: return input->lane == LANE_RGB ? CC_RASC : CC_RASA;
 	case OPERAND_CONSTANT:
 	case OPERAND_FRACTION:
 		stage->konst_color = konst_select(compiler, PIPE_COLOR, input);
@@ -1902,6 +2191,19 @@ value */
 static int place_constants(struct compiler *compiler)
 {
 	int index, input, next = 0;
+
+	/* the constants held in registers from the start */
+	for (index = 0; index < compiler->slot_count; index++)
+	{
+		const struct slot *slot = &compiler->slots[index];
+
+		if (slot->constant == NONE || slot->register_index == NONE)
+			continue;
+		if (slot->pipe == PIPE_COLOR)
+			compiler->program->initial_color[slot->register_index] = compiler->constants[slot->constant];
+		else
+			compiler->program->initial_alpha[slot->register_index] = compiler->constants[slot->constant];
+	}
 
 	for (index = 0; index < compiler->operation_count; index++)
 	{
@@ -1981,8 +2283,31 @@ static void emit(struct compiler *compiler, short stage_operations[MAXIMUM_SCHED
 	}
 }
 
+static int compile(const struct nv2a_combiners *combiners, const struct nv2a_tev_options *options,
+	struct nv2a_tev_program *program, const char **failure, int constant_registers);
+
+/* with constants in registers where they would cost an operation, and
+without when that leaves too few registers */
 int nv2a_tev_compile(const struct nv2a_combiners *combiners, const struct nv2a_tev_options *options,
 	struct nv2a_tev_program *program, const char **failure)
+{
+	const char *first;
+
+	if (compile(combiners, options, program, &first, 1))
+	{
+		if (failure)
+			*failure = NULL;
+		return 1;
+	}
+	if (compile(combiners, options, program, failure, 0))
+		return 1;
+	if (failure && strstr(first, "TEV stages"))
+		*failure = first;
+	return 0;
+}
+
+static int compile(const struct nv2a_combiners *combiners, const struct nv2a_tev_options *options,
+	struct nv2a_tev_program *program, const char **failure, int constant_registers)
 {
 	static struct compiler compiler_storage;
 	struct compiler *compiler = &compiler_storage;
@@ -1994,6 +2319,7 @@ int nv2a_tev_compile(const struct nv2a_combiners *combiners, const struct nv2a_t
 	compiler->combiners = combiners;
 	compiler->options = options;
 	compiler->program = program;
+	compiler->constant_registers = constant_registers;
 	compiler->final_ef = compiler->final_v1r0_sum = NONE;
 	compiler->stage_count = (int)(combiners->combiner_count & 0xff);
 	if (compiler->stage_count > 8)
@@ -2095,14 +2421,24 @@ void nv2a_tev_constant_value(const struct nv2a_tev_constant *constant, const uin
 	case _nv2a_constant_final_c1: color = final_c1; break;
 	case _nv2a_constant_fog: color = fog_color | 0xff000000UL; break;
 	case _nv2a_constant_literal:
-		memcpy(rgba, constant->value, 4);
-		return;
+		color = ((uint32_t)constant->value[3] << 24) | ((uint32_t)constant->value[0] << 16) |
+			((uint32_t)constant->value[1] << 8) | constant->value[2];
+		break;
 	default: color = 0; break;
 	}
 	rgba[0] = (uint8_t)(color >> 16);
 	rgba[1] = (uint8_t)(color >> 8);
 	rgba[2] = (uint8_t)color;
 	rgba[3] = (uint8_t)(color >> 24);
+	if (constant->lane < 4)
+		memset(rgba, rgba[constant->lane], 4);
+	if (constant->invert)
+	{
+		int channel;
+
+		for (channel = 0; channel < 4; channel++)
+			rgba[channel] = (uint8_t)(255 - rgba[channel]);
+	}
 }
 
 void nv2a_tev_constant_classes(const struct nv2a_tev_options *options, uint32_t classes[5])

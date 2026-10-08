@@ -90,6 +90,10 @@ struct nv2a_tev_constant
 	uint8_t index;
 	/* the literal's RGBA */
 	uint8_t value[4];
+	/* as a register's initial value: one channel of it in all four
+	(GX_CH_*), or 4 for the color as it is; and 1 - it */
+	uint8_t lane;
+	uint8_t invert;
 };
 
 /* one TEV stage, in GX's numbers (GX_CC_*, GX_CA_*, GX_TEV_*, GX_TB_*,
@@ -155,8 +159,8 @@ c0 and c1, in five words; two draws whose classes and combiner state are
 the same share a translation */
 void nv2a_tev_constant_classes(const struct nv2a_tev_options *options, uint32_t classes[5]);
 
-/* the constant's RGBA as TEV's constant registers take it, from the
-combiner constants (D3DCOLOR, alpha in the top byte, as the render states
+/* the constant's RGBA as TEV's registers take it (its lane and inversion
+applied), from the combiner constants (D3DCOLOR, alpha in the top byte, as the render states
 hold them) and the fog color */
 void nv2a_tev_constant_value(const struct nv2a_tev_constant *constant, const uint32_t c0[8], const uint32_t c1[8],
 	uint32_t final_c0, uint32_t final_c1, uint32_t fog_color, uint8_t rgba[4]);
