@@ -1295,7 +1295,7 @@ typedef char verify_widget_instance_text_box_string_list_index_offset[
 
 static boolean transition_to_game_in_progress(
 	void);
-static __inline real compute_offset_coordinate(
+__inline real compute_offset_coordinate(
 	long time,
 	real delta_per_second);
 static short get_icon_type(
@@ -1320,7 +1320,7 @@ static void ui_widget_delete_children_recursive(
 static struct widget_instance *ui_widget_launch_widget(
 	struct widget_instance *widget,
 	long new_widget_tag_index);
-static __inline boolean widget_instance_can_handle_events(
+__inline boolean widget_instance_can_handle_events(
 	struct widget_instance *widget);
 static struct widget_instance *widget_instance_find_by_tag_index_recursive(
 	struct widget_instance *widget,
@@ -1333,7 +1333,7 @@ static void widget_instance_give_focus_by_tag(
 	long tag_index,
 	short local_player_index);
 
-static __inline struct widget_instance *widget_instance_get_tail_child_widget(
+__inline struct widget_instance *widget_instance_get_tail_child_widget(
 	struct widget_instance *widget);
 static void ui_widget_add_child(
 	struct widget_instance *parent,
@@ -1349,7 +1349,7 @@ static void widget_instance_set_focused_child_by_index(
 	short child_index);
 static void widget_instance_go_back_to_previous(
 	struct widget_instance *widget);
-static __inline struct widget_instance *widget_instance_find_by_tag_index(
+__inline struct widget_instance *widget_instance_find_by_tag_index(
 	long tag_index);
 static void widget_instance_reload_recursive(
 	struct widget_instance *widget);
@@ -1382,7 +1382,7 @@ static void widget_instance_initialize(
 	long tag_index,
 	short local_player_index,
 	short widget_stack);
-static __inline real widget_instance_get_cumulative_alpha_modifier(
+__inline real widget_instance_get_cumulative_alpha_modifier(
 	struct widget_instance *widget);
 static boolean widget_instance_text_box_is_focused(
 	struct widget_instance *widget);
@@ -1416,9 +1416,9 @@ static void widget_instance_render_recursive(
 	point2d offset,
 	boolean focus,
 	boolean use_nifty_plasma_fx);
-static __inline void widget_instance_update_animation_parameters(
+__inline void widget_instance_update_animation_parameters(
 	struct widget_instance *widget);
-static __inline void spinner_list_update(
+__inline void spinner_list_update(
 	struct widget_instance *widget);
 static void column_list_update(
 	struct widget_instance *widget,
@@ -1655,7 +1655,7 @@ void ui_widgets_inhibit_processing(
 	return;
 }
 
-static __inline real compute_offset_coordinate(
+__inline real compute_offset_coordinate(
 	long time,
 	real delta_per_second)
 {
@@ -2466,7 +2466,7 @@ static struct widget_instance *ui_widget_launch_widget(
 	return new_widget;
 }
 
-static __inline boolean widget_instance_can_handle_events(
+__inline boolean widget_instance_can_handle_events(
 	struct widget_instance *widget)
 {
 	struct ui_widget_definition *definition = ui_widget_definition_get(widget->definition_tag_index);
@@ -3015,7 +3015,7 @@ void ui_play_audio_feedback_sound(
 	return;
 }
 
-static __inline struct widget_instance *widget_instance_get_tail_child_widget(
+__inline struct widget_instance *widget_instance_get_tail_child_widget(
 	struct widget_instance *widget)
 {
 	struct widget_instance *child = widget->child;
@@ -3223,7 +3223,7 @@ static void widget_instance_go_back_to_previous(
 	return;
 }
 
-static __inline struct widget_instance *widget_instance_find_by_tag_index(
+__inline struct widget_instance *widget_instance_find_by_tag_index(
 	long tag_index)
 {
 	struct widget_instance *result = NULL;
@@ -4963,7 +4963,7 @@ real_argb_color get_ui_argb_white(
 	return result;
 }
 
-static __inline real widget_instance_get_cumulative_alpha_modifier(
+__inline real widget_instance_get_cumulative_alpha_modifier(
 	struct widget_instance *widget)
 {
 	real alpha_modifier = widget->alpha_modifier;
@@ -6539,7 +6539,7 @@ static void widget_instance_render_column_list(
 	return;
 }
 
-static __inline void widget_instance_update_animation_parameters(
+__inline void widget_instance_update_animation_parameters(
 	struct widget_instance *widget)
 {
 	widget->animation.first_frame_index =
@@ -6550,7 +6550,7 @@ static __inline void widget_instance_update_animation_parameters(
 	return;
 }
 
-static __inline void spinner_list_update(
+__inline void spinner_list_update(
 	struct widget_instance *widget)
 {
 	struct widget_instance *child;

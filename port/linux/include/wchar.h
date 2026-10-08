@@ -23,7 +23,9 @@ swprintf()/vswprintf() take no buffer size.
 #error the Linux build requires -fshort-wchar
 #endif
 
-#ifndef __wint_t_defined
+/* gcc's stddef.h (pulled in by newlib's headers) defines _WINT_T along with
+its own 32-bit wint_t; only supply the 16-bit one when nothing else has. */
+#if !defined(__wint_t_defined) && !defined(_WINT_T)
 #define __wint_t_defined 1
 #define _WINT_T 1
 typedef unsigned short wint_t;

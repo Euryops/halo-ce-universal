@@ -107,3 +107,12 @@ platform layer includes the XDK headers itself, via platform.h. */
 #define __fastcall
 #define _cdecl
 #define _stdcall
+
+/* ---------- __declspec: gcc has no such keyword, so map the few that occur
+(noreturn, align(n); dllexport/dllimport mean nothing here). */
+#define __declspec(x) HALO_WII_DECLSPEC_##x
+#define HALO_WII_DECLSPEC_noreturn __attribute__((noreturn))
+#define HALO_WII_DECLSPEC_align(n) __attribute__((aligned(n)))
+#define HALO_WII_DECLSPEC_dllexport
+#define HALO_WII_DECLSPEC_dllimport
+#define HALO_WII_DECLSPEC_selectany __attribute__((weak))
