@@ -129,6 +129,120 @@ void nv2a_unpack_normpacked3(uint32_t packed, float out[4])
 	out[3] = 1.0f;
 }
 
+unsigned long nv2a_vsh_type_bytes(unsigned type)
+{
+	switch (type)
+	{
+	case NV2A_VSDT_FLOAT1: return 4;
+	case NV2A_VSDT_FLOAT2: return 8;
+	case NV2A_VSDT_FLOAT3: return 12;
+	case NV2A_VSDT_FLOAT4: return 16;
+	case NV2A_VSDT_FLOAT2H: return 12;
+	case NV2A_VSDT_D3DCOLOR: return 4;
+	case NV2A_VSDT_SHORT1: case NV2A_VSDT_NORMSHORT1: return 2;
+	case NV2A_VSDT_SHORT2: case NV2A_VSDT_NORMSHORT2: return 4;
+	case NV2A_VSDT_SHORT3: case NV2A_VSDT_NORMSHORT3: return 6;
+	case NV2A_VSDT_SHORT4: case NV2A_VSDT_NORMSHORT4: return 8;
+	case NV2A_VSDT_NORMPACKED3: return 4;
+	case NV2A_VSDT_PBYTE1: return 1;
+	case NV2A_VSDT_PBYTE2: return 2;
+	case NV2A_VSDT_PBYTE3: return 3;
+	case NV2A_VSDT_PBYTE4: return 4;
+	default: return 0;
+	}
+}
+
+void nv2a_vsh_fetch(unsigned type, const unsigned char *data, float out[4])
+{
+	unsigned long bytes = nv2a_vsh_type_bytes(type);
+	unsigned long index;
+
+	out[0] = out[1] = out[2] = 0.0f;
+	out[3] = 1.0f;
+	switch (type)
+	{
+	case NV2A_VSDT_FLOAT1: case NV2A_VSDT_FLOAT2: case NV2A_VSDT_FLOAT3: case NV2A_VSDT_FLOAT4:
+	case NV2A_VSDT_FLOAT2H:
+		memcpy(out, data, bytes);
+		break;
+	case NV2A_VSDT_D3DCOLOR:
+	{
+		uint32_t color;
+
+		/* A8R8G8B8 in a word: the registers' x is red */
+		memcpy(&color, data, sizeof(color));
+		out[0] = ((color >> 16) & 0xff) / 255.0f;
+		out[1] = ((color >> 8) & 0xff) / 255.0f;
+		out[2] = (color & 0xff) / 255.0f;
+		out[3] = (color >> 24) / 255.0f;
+		break;
+	}
+	case NV2A_VSDT_SHORT1: case NV2A_VSDT_SHORT2: case NV2A_VSDT_SHORT3: case NV2A_VSDT_SHORT4:
+	case NV2A_VSDT_NORMSHORT1: case NV2A_VSDT_NORMSHORT2: case NV2A_VSDT_NORMSHORT3: case NV2A_VSDT_NORMSHORT4:
+	{
+		int normalized = (type & 0x0f) == 0x01;
+
+		for (index = 0; index < bytes / 2; index++)
+		{
+			int16_t value;
+
+			memcpy(&value, data + index * 2, sizeof(value));
+			out[index] = normalized ? (value < -32767 ? -1.0f : value / 32767.0f) : (float)value;
+		}
+		break;
+	}
+	case NV2A_VSDT_NORMPACKED3:
+	{
+		uint32_t packed;
+
+		memcpy(&packed, data, sizeof(packed));
+		nv2a_unpack_normpacked3(packed, out);
+		break;
+	}
+	case NV2A_VSDT_PBYTE1: case NV2A_VSDT_PBYTE2: case NV2A_VSDT_PBYTE3: case NV2A_VSDT_PBYTE4:
+		for (index = 0; index < bytes; index++)
+			out[index] = data[index] / 255.0f;
+		break;
+	default:
+		break;
+	}
+}
+
+void nv2a_vsh_clip_position(const struct nv2a_vsh_result *result, const float c38[4], const float c37[4],
+	const float viewport_scale[3], const float viewport_offset[3], float clip[4])
+{
+	float scale[3];
+	int axis;
+
+	for (axis = 0; axis < 3; axis++)
+		scale[axis] = viewport_scale[axis] != 0.0f ? viewport_scale[axis] : 1.0f;
+	/* Direct3D 8 puts pixel centres on integer screen coordinates, GX (as
+	OpenGL) on half-integers */
+	if (result->clip_captured)
+	{
+		float w = result->clip[3];
+
+		clip[0] = (result->clip[0] * c38[0] + (c37[0] + 0.5f - viewport_offset[0]) * w) / scale[0];
+		clip[1] = (result->clip[1] * c38[1] + (c37[1] + 0.5f - viewport_offset[1]) * w) / scale[1];
+		clip[2] = (result->clip[2] * c38[2] + (c37[2] - viewport_offset[2]) * w) / scale[2];
+		clip[3] = w;
+	}
+	else
+	{
+		float w = result->position[3];
+
+		clip[0] = (result->position[0] + 0.5f - viewport_offset[0]) / scale[0] * w;
+		clip[1] = (result->position[1] + 0.5f - viewport_offset[1]) / scale[1] * w;
+		clip[2] = (result->position[2] - viewport_offset[2]) / scale[2] * w;
+		clip[3] = w;
+	}
+	if (!(fabsf(clip[3]) > 0.0f))
+	{
+		clip[0] = clip[1] = clip[2] = 0.0f;
+		clip[3] = -1.0f;
+	}
+}
+
 static void write_masked(float *destination, const float *value, unsigned mask)
 {
 	if (mask & 8) destination[0] = value[0];

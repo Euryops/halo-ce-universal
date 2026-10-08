@@ -603,33 +603,6 @@ void WINAPI D3DDevice_SetPixelShaderProgram(D3DPIXELSHADERDEF *definition)
 
 /* ---------- vertex shaders */
 
-static unsigned long vertex_type_bytes(unsigned long type)
-{
-	switch (type)
-	{
-	case D3DVSDT_FLOAT1: return 4;
-	case D3DVSDT_FLOAT2: return 8;
-	case D3DVSDT_FLOAT3: return 12;
-	case D3DVSDT_FLOAT4: return 16;
-	case D3DVSDT_D3DCOLOR: return 4;
-	case D3DVSDT_SHORT1: return 2;
-	case D3DVSDT_SHORT2: return 4;
-	case D3DVSDT_SHORT3: return 6;
-	case D3DVSDT_SHORT4: return 8;
-	case D3DVSDT_NORMSHORT1: return 2;
-	case D3DVSDT_NORMSHORT2: return 4;
-	case D3DVSDT_NORMSHORT3: return 6;
-	case D3DVSDT_NORMSHORT4: return 8;
-	case D3DVSDT_NORMPACKED3: return 4;
-	case D3DVSDT_PBYTE1: return 1;
-	case D3DVSDT_PBYTE2: return 2;
-	case D3DVSDT_PBYTE3: return 3;
-	case D3DVSDT_PBYTE4: return 4;
-	case D3DVSDT_FLOAT2H: return 12;
-	default: return 0;
-	}
-}
-
 static void parse_declaration(struct vertex_shader_object *object, const DWORD *declaration)
 {
 	unsigned long stream = 0;
@@ -660,7 +633,7 @@ static void parse_declaration(struct vertex_shader_object *object, const DWORD *
 				element->reg = (unsigned char)(token & D3DVSD_VERTEXREGMASK);
 				element->stream = (unsigned char)stream;
 				element->type = (unsigned char)((token & D3DVSD_DATATYPEMASK) >> D3DVSD_DATATYPESHIFT);
-				element->bytes = (unsigned char)vertex_type_bytes(element->type);
+				element->bytes = (unsigned char)nv2a_vsh_type_bytes(element->type);
 				element->offset = (unsigned short)offsets[stream];
 				offsets[stream] += element->bytes;
 			}
@@ -1052,102 +1025,6 @@ static void reserve_indices(unsigned long count)
 	device.indices = malloc(device.index_capacity * sizeof(*device.indices));
 }
 
-/* one attribute of a vertex, as the NV2A reads it: in the Wii's byte
-order, which is how the map converter leaves the maps' vertices and how the
-game writes its own */
-static void read_attribute(const struct vertex_element *element, const unsigned char *data, float *out)
-{
-	int index, count;
-
-	out[0] = out[1] = out[2] = 0.0f;
-	out[3] = 1.0f;
-	switch (element->type)
-	{
-	case D3DVSDT_FLOAT1: case D3DVSDT_FLOAT2: case D3DVSDT_FLOAT3: case D3DVSDT_FLOAT4: case D3DVSDT_FLOAT2H:
-		count = element->bytes / 4;
-		memcpy(out, data, count * sizeof(float));
-		break;
-	case D3DVSDT_D3DCOLOR:
-	{
-		uint32_t color;
-
-		memcpy(&color, data, sizeof(color));
-		color_to_vec4(color, out);
-		break;
-	}
-	case D3DVSDT_SHORT1: case D3DVSDT_SHORT2: case D3DVSDT_SHORT3: case D3DVSDT_SHORT4:
-	case D3DVSDT_NORMSHORT1: case D3DVSDT_NORMSHORT2: case D3DVSDT_NORMSHORT3: case D3DVSDT_NORMSHORT4:
-	{
-		BOOL normalized = (element->type & 0x0f) == 0x01;
-
-		count = element->bytes / 2;
-		for (index = 0; index < count; index++)
-		{
-			int16_t value;
-
-			memcpy(&value, data + index * 2, sizeof(value));
-			out[index] = normalized ? (value < -32767 ? -1.0f : value / 32767.0f) : (float)value;
-		}
-		break;
-	}
-	case D3DVSDT_NORMPACKED3:
-	{
-		uint32_t packed;
-
-		memcpy(&packed, data, sizeof(packed));
-		nv2a_unpack_normpacked3(packed, out);
-		break;
-	}
-	case D3DVSDT_PBYTE1: case D3DVSDT_PBYTE2: case D3DVSDT_PBYTE3: case D3DVSDT_PBYTE4:
-		for (index = 0; index < element->bytes; index++)
-			out[index] = data[index] / 255.0f;
-		break;
-	default:
-		break;
-	}
-}
-
-/* the clip-space position, in Direct3D's terms, of what a program wrote:
-the program's screen-space conversion undone, as the Linux port's GLSL
-does it (nv2a_vsh.c), from the position it converted where that was kept */
-static void clip_position(const struct nv2a_vsh_result *result, float clip[4])
-{
-	const float *c38 = device.constants[NV2A_VSH_CONSTANT_BIAS - 38];
-	const float *c37 = device.constants[NV2A_VSH_CONSTANT_BIAS - 37];
-	float scale[3];
-	int axis;
-
-	for (axis = 0; axis < 3; axis++)
-		scale[axis] = device.viewport_scale[axis] != 0.0f ? device.viewport_scale[axis] : 1.0f;
-	/* Direct3D 8 puts pixel centres on integer screen coordinates, GX (as
-	OpenGL) on half-integers */
-	if (result->clip_captured)
-	{
-		float w = result->clip[3];
-
-		clip[0] = (result->clip[0] * c38[0] + (c37[0] + 0.5f - device.viewport_offset[0]) * w) / scale[0];
-		clip[1] = (result->clip[1] * c38[1] + (c37[1] + 0.5f - device.viewport_offset[1]) * w) / scale[1];
-		clip[2] = (result->clip[2] * c38[2] + (c37[2] - device.viewport_offset[2]) * w) / scale[2];
-		clip[3] = w;
-	}
-	else
-	{
-		float w = result->position[3];
-
-		clip[0] = (result->position[0] + 0.5f - device.viewport_offset[0]) / scale[0] * w;
-		clip[1] = (result->position[1] + 0.5f - device.viewport_offset[1]) / scale[1] * w;
-		clip[2] = (result->position[2] - device.viewport_offset[2]) / scale[2] * w;
-		clip[3] = w;
-	}
-	/* a w of zero or not a number: behind the camera, which the clipper
-	takes, as the Xbox's divide sent it to infinity */
-	if (!(fabsf(clip[3]) > 0.0f))
-	{
-		clip[0] = clip[1] = clip[2] = 0.0f;
-		clip[3] = -1.0f;
-	}
-}
-
 /* the bytes of a color, red in the top byte, from a program's output */
 static uint32_t output_color(const float *value)
 {
@@ -1164,7 +1041,8 @@ static void transform_vertex(const struct nv2a_vsh_program *program, const float
 	int index;
 
 	nv2a_vsh_run(program, (const float (*)[4])device.constants, inputs, &result);
-	clip_position(&result, clip);
+	nv2a_vsh_clip_position(&result, device.constants[NV2A_VSH_CONSTANT_BIAS - 38],
+		device.constants[NV2A_VSH_CONSTANT_BIAS - 37], device.viewport_scale, device.viewport_offset, clip);
 	vertex->color = output_color(result.diffuse);
 	vertex->specular = output_color(result.specular);
 	vertex->fog = D3D__RenderState[D3DRS_FOGENABLE] ? fog_factor(result.fog) : 1.0f;
@@ -1194,7 +1072,7 @@ static void transform_streams(unsigned long first, unsigned long count)
 
 			if (!data || source->reg >= NV2A_VSH_ATTRIBUTE_COUNT)
 				continue;
-			read_attribute(source, (const unsigned char *)data +
+			nv2a_vsh_fetch(source->type, (const unsigned char *)data +
 				(first + vertex) * device.streams[source->stream].stride + source->offset, inputs[source->reg]);
 		}
 		transform_vertex(program, (const float (*)[4])inputs, &device.vertices[vertex],

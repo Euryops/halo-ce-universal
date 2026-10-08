@@ -85,4 +85,37 @@ void nv2a_vsh_run(const struct nv2a_vsh_program *program, const float (*constant
 11 bits, z 10, signed, in one 32-bit word */
 void nv2a_unpack_normpacked3(uint32_t packed, float out[4]);
 
+/* the data types of a vertex declaration's elements: the XDK's D3DVSDT_*,
+which are the NV2A's own */
+enum
+{
+	NV2A_VSDT_NORMSHORT1 = 0x11, NV2A_VSDT_FLOAT1 = 0x12, NV2A_VSDT_PBYTE1 = 0x14,
+	NV2A_VSDT_SHORT1 = 0x15, NV2A_VSDT_NORMPACKED3 = 0x16,
+	NV2A_VSDT_NORMSHORT2 = 0x21, NV2A_VSDT_FLOAT2 = 0x22, NV2A_VSDT_PBYTE2 = 0x24, NV2A_VSDT_SHORT2 = 0x25,
+	NV2A_VSDT_NORMSHORT3 = 0x31, NV2A_VSDT_FLOAT3 = 0x32, NV2A_VSDT_PBYTE3 = 0x34, NV2A_VSDT_SHORT3 = 0x35,
+	NV2A_VSDT_D3DCOLOR = 0x40, NV2A_VSDT_NORMSHORT4 = 0x41, NV2A_VSDT_FLOAT4 = 0x42, NV2A_VSDT_PBYTE4 = 0x44,
+	NV2A_VSDT_SHORT4 = 0x45, NV2A_VSDT_FLOAT2H = 0x72,
+};
+
+/* the bytes one element of the type takes in a vertex; 0 for a type the
+NV2A does not have */
+unsigned long nv2a_vsh_type_bytes(unsigned type);
+
+/* one element of a vertex as the NV2A reads it into its input register, in
+the CPU's byte order (the Wii's: the map converter swaps the maps' vertices,
+and the game writes its own); the components the type does not have are 0,
+and w 1 */
+void nv2a_vsh_fetch(unsigned type, const unsigned char *data, float out[4]);
+
+/* the clip-space position, in Direct3D's terms, of what a program wrote: its
+screen-space conversion with c[-38] and c[-37] undone, as the Linux port's
+GLSL does it (port/linux/src/nv2a_vsh.c), from the clip position it kept
+where it kept it. viewport_scale and viewport_offset are what Direct3D
+derives the two constants from for the viewport (an axis whose scale is 0
+counts as 1). A w of zero, or not a number, comes back as a point behind
+the camera, which the clipper takes, as the Xbox's divide sent it to
+infinity. */
+void nv2a_vsh_clip_position(const struct nv2a_vsh_result *result, const float c38[4], const float c37[4],
+	const float viewport_scale[3], const float viewport_offset[3], float clip[4]);
+
 #endif /* __NV2A_VSH_RUN_H */
