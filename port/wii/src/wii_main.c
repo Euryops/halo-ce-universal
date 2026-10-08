@@ -64,10 +64,20 @@ static void video_initialize(void)
 		VIDEO_WaitVSync();
 }
 
+/* the video mode, for the GX device (gx_backend.c), which takes the screen
+from the console with frame buffers of its own */
+void *wii_video_mode(void)
+{
+	return video_mode;
+}
+
 /* show what is on the console until the power goes, rather than going back
-to the loader with the log gone */
+to the loader with the log gone; the console's frame buffer comes back if
+the game had the screen */
 static void hold_screen(void)
 {
+	VIDEO_SetNextFramebuffer(framebuffer);
+	VIDEO_Flush();
 	for (;;)
 		VIDEO_WaitVSync();
 }

@@ -43,6 +43,10 @@ not. Nothing includes this yet: it is for the stages that read the maps (3: load
 
 /* + GX_TF_RGB5A3 (0x5), GX_TF_RGBA8 (0x6) or GX_TF_CMPR (0xE) */
 #define HALO_WII_BITMAP_FORMAT_GX 0x40
+/* the same, as the Direct3D format of the bitmap's texture header (its
+Format word's format field): the GX device (port/wii/src/d3d8_gx.h) samples
+a texture with one of these as it is, where an Xbox format is converted */
+#define HALO_WII_D3DFMT_GX 0xC0
 
 #define HALO_WII_SOUND_COMPRESSION_DSP_ADPCM 0x40
 #define HALO_WII_DSP_ADPCM_HEADER_SIZE 96

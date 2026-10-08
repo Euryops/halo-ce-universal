@@ -66,7 +66,8 @@ echo "==> platform layer"
 # port/wii/src, and the Linux layer's units that touch no host OS: the
 # pooled COMMON globals, the wide-character runtime, Bink's null player and
 # the debug monitor's empty module list
-for f in port/wii/src/wii_crt.c port/wii/src/wii_xbox.c port/linux/src/halo_linker_common.c \
+for f in port/wii/src/wii_crt.c port/wii/src/wii_xbox.c port/wii/src/d3d8_gx.c port/wii/src/d3d8_gx_resources.c \
+		port/linux/src/halo_linker_common.c \
 		port/linux/src/msvc_wide.c port/linux/src/bink_null.c port/linux/src/xbdm.c; do
 	compile "$f" "$B/platform/$(basename "$f" .c).o" PLATFORM
 done
@@ -74,6 +75,9 @@ done
 LIBOGC="$ABI -std=gnu11 -Wall -I$D/libogc/include"
 compile port/wii/src/wii_main.c $B/platform/wii_main.o LIBOGC
 compile port/wii/src/wii_os.c $B/platform/wii_os.o LIBOGC
+# the GX device's libogc half, and the vertex programs' interpreter (plain C)
+compile port/wii/src/gx_backend.c $B/platform/gx_backend.o LIBOGC
+compile port/wii/src/nv2a_vsh_run.c $B/platform/nv2a_vsh_run.o LIBOGC
 # the game's sin, pow and the rest, the same on every port (port/include/halo_math.h)
 MUSL="$ABI -std=gnu11 -w -Iport/third_party/musl-math/include -include port/third_party/musl-math/include/libm.h"
 for f in port/third_party/musl-math/src/*.c; do compile "$f" "$B/musl/$(basename "$f" .c).o" MUSL; done

@@ -2,8 +2,8 @@
 WII_XBOX.C
 
 The XAPI calls the game makes while it starts, on the Wii: memory, time,
-errors, events, mutexes and threads, and files on the SD card. The rest of the SDK (Direct3D, DirectSound, XInput,
-XNet, files) is stubbed by wii_stubs.c, generated at build time from what the
+errors, events, mutexes and threads, and files on the SD card. Direct3D is
+d3d8_gx.c. The rest of the SDK (DirectSound, XInput, XNet) is stubbed by wii_stubs.c, generated at build time from what the
 link is missing, until a stage of docs/plans/2026-10-09-halo-on-the-wii.md
 replaces each part.
 */
@@ -31,10 +31,6 @@ struct mallinfo mallinfo(void);
 XPP_DEVICE_TYPE XDEVICE_TYPE_GAMEPAD_TABLE;
 XPP_DEVICE_TYPE XDEVICE_TYPE_MEMORY_UNIT_TABLE;
 XPP_DEVICE_TYPE XDEVICE_TYPE_DEBUG_KEYBOARD_TABLE;
-
-DWORD D3D__RenderState[D3DRS_MAX];
-DWORD D3D__TextureState[D3DTSS_MAXSTAGES][D3DTSS_MAX];
-WORD *D3D__IndexData;
 
 /* ---------- memory
 
@@ -1266,4 +1262,37 @@ BOOL WINAPI XFindNextSaveGame(HANDLE object, PXGAME_FIND_DATA find_game_data)
 BOOL WINAPI XFindClose(HANDLE object)
 {
 	return CloseHandle(object);
+}
+
+/* ---------- controllers, until stage 5
+
+No pads yet, and no debug keyboard. The keyboard's queue must say it is
+empty: the game reads keystrokes until the call fails (input_xbox.c), and
+the generated stub's 0 is ERROR_SUCCESS, which held it in that loop for
+ever once the GX device let it get that far. */
+
+VOID WINAPI XInitDevices(DWORD preallocation_type_count, PXDEVICE_PREALLOC_TYPE preallocation_types)
+{
+	(void)preallocation_type_count;
+	(void)preallocation_types;
+}
+
+BOOL WINAPI XGetDeviceChanges(PXPP_DEVICE_TYPE device_type, PDWORD insertions, PDWORD removals)
+{
+	(void)device_type;
+	*insertions = 0;
+	*removals = 0;
+	return FALSE;
+}
+
+DWORD WINAPI XInputDebugInitKeyboardQueue(PXINPUT_DEBUG_KEYQUEUE_PARAMETERS parameters)
+{
+	(void)parameters;
+	return ERROR_SUCCESS;
+}
+
+DWORD WINAPI XInputDebugGetKeystroke(PXINPUT_DEBUG_KEYSTROKE keystroke)
+{
+	(void)keystroke;
+	return ERROR_HANDLE_EOF;
 }
