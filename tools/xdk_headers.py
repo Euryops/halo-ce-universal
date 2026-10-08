@@ -48,6 +48,11 @@ TARGETS = {
 
 AGGREGATE_LEAVES = (LF_STRUCTURE, LF_CLASS, LF_UNION, LF_ENUM)
 
+# unions whose structure of halves is the low word then the high one, an
+# image of a little-endian 64-bit integer: on a big-endian target (the Wii)
+# the high word comes first, or HighPart reads QuadPart's low half
+BIG_ENDIAN_HALVES = ("_LARGE_INTEGER", "_ULARGE_INTEGER")
+
 # arrays whose bound a unit may choose (a Winsock fd_set holds FD_SETSIZE
 # sockets, 64 unless the unit defines more, as the ports' prefixes do): the
 # member's bound is written as the macro, whose default the layout check uses
@@ -493,7 +498,7 @@ class Writer:
         for name in sorted(n for n in self.prototypes if n in self.inline_in_sdk):
             out.append(f"{self.prototype(name, self.prototypes[name])};")
         out += ["", "#endif", ""]
-        return "\n".join(out)
+        return big_endian_halves("\n".join(out))
 
     # ---------- checking layouts against the PDB
 
@@ -538,6 +543,24 @@ class Writer:
                     raise PdbError(f"{key[1]} does not lay out as the PDB records")
                 self.packing[key] = smaller
         raise PdbError("layouts still differ: " + " ".join(sorted(k[1] for k in failures)))
+
+
+def big_endian_halves(header: str) -> str:
+    """Each BIG_ENDIAN_HALVES union's LowPart/HighPart pairs in the other
+    order under __BIG_ENDIAN__; a header already written so is left as it is."""
+    for tag in BIG_ENDIAN_HALVES:
+        start = header.index(f"union {tag} {{\n")
+        end = header.index("\n};\n", start)
+        if "__BIG_ENDIAN__" in header[start:end]:
+            continue
+        body = re.sub(
+            r"^( +)(unsigned long LowPart;)\n\1((?:unsigned )?long HighPart;)\n",
+            r"#ifdef __BIG_ENDIAN__\n\1\3\n\1\2\n#else\n\1\2\n\1\3\n#endif\n",
+            header[start:end],
+            flags=re.M,
+        )
+        header = header[:start] + body + header[end:]
+    return header
 
 
 def join(left: str, right: str) -> str:

@@ -13,6 +13,8 @@ threads on.
 #include <string.h>
 #include <sys/iosupport.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
+#include <dirent.h>
 #include <unistd.h>
 #include <gccore.h>
 #include <ogc/cond.h>
@@ -65,6 +67,94 @@ long wii_file_size(int file)
 int wii_make_directory(const char *path)
 {
 	return mkdir(path, 0777);
+}
+
+static void information_from_stat(const struct stat *status, struct wii_path_information *information)
+{
+	information->kind = S_ISDIR(status->st_mode) ? _wii_path_directory : _wii_path_file;
+	information->size = (unsigned long)status->st_size;
+	information->modified = (long long)status->st_mtime;
+}
+
+int wii_path_information(const char *path, struct wii_path_information *information)
+{
+	struct stat status;
+
+	if (stat(path, &status) != 0)
+		return -1;
+	information_from_stat(&status, information);
+	return 0;
+}
+
+int wii_file_information(int file, struct wii_path_information *information)
+{
+	struct stat status;
+
+	if (fstat(file, &status) != 0)
+		return -1;
+	information_from_stat(&status, information);
+	return 0;
+}
+
+int wii_disk_space(const char *path, unsigned long long *free_bytes, unsigned long long *total_bytes)
+{
+	struct statvfs status;
+
+	if (statvfs(path, &status) != 0)
+		return -1;
+	*free_bytes = (unsigned long long)status.f_bavail * status.f_frsize;
+	*total_bytes = (unsigned long long)status.f_blocks * status.f_frsize;
+	return 0;
+}
+
+struct wii_directory
+{
+	DIR *directory;
+	char path[1024];
+};
+
+struct wii_directory *wii_directory_open(const char *path)
+{
+	struct wii_directory *directory = malloc(sizeof(*directory));
+
+	if (!directory)
+	{
+		errno = ENOMEM;
+		return NULL;
+	}
+	directory->directory = opendir(path);
+	if (!directory->directory)
+	{
+		free(directory);
+		return NULL;
+	}
+	snprintf(directory->path, sizeof(directory->path), "%s", path);
+	return directory;
+}
+
+int wii_directory_next(struct wii_directory *directory, char *name, unsigned long name_size,
+	struct wii_path_information *information)
+{
+	struct dirent *entry;
+
+	while ((entry = readdir(directory->directory)))
+	{
+		char path[1400];
+
+		snprintf(path, sizeof(path), "%s/%s", directory->path, entry->d_name);
+		/* (an entry that cannot be stat'd is passed over) */
+		if (wii_path_information(path, information) != 0)
+			continue;
+		snprintf(name, name_size, "%s", entry->d_name);
+		return 1;
+	}
+	return 0;
+}
+
+void wii_directory_close(struct wii_directory *directory)
+{
+	closedir(directory->directory);
+	free(directory);
 }
 
 /* stdout and stderr are the console's devoptab; the copy wraps its write */

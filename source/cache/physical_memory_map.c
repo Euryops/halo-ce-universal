@@ -46,10 +46,15 @@ symbols in this file:
 #define GAME_STATE_SIZE HALO_PORT_GAME_STATE_SIZE
 #define GAME_STATE_VERIFY_SIZE HALO_PORT_GAME_STATE_CPU_SIZE
 #ifdef GEKKO
-/* the Wii's code is where the Xbox's tag cache was (port/wii/halo_wii_capacity.h) */
+/* the Wii's code is where the Xbox's tag cache was, and the caches have
+fixed places in MEM2 beside it (port/wii/halo_wii_capacity.h) */
 #define TAG_CACHE_BASE_ADDRESS HALO_WII_TAG_CACHE_BASE_ADDRESS
+#define TEXTURE_CACHE_PLACE (HALO_WII_TEXTURE_CACHE_BASE_ADDRESS & 0x7FFFFFFF)
+#define SOUND_CACHE_PLACE (HALO_WII_SOUND_CACHE_BASE_ADDRESS & 0x7FFFFFFF)
 #else
 #define TAG_CACHE_BASE_ADDRESS 0x803A6000
+#define TEXTURE_CACHE_PLACE -1
+#define SOUND_CACHE_PLACE -1
 #endif
 /* the native builds' larger texture cache (halo_port_capacity.h) */
 #define TEXTURE_CACHE_SIZE HALO_PORT_TEXTURE_CACHE_SIZE
@@ -86,11 +91,11 @@ void physical_memory_allocate(
 #line 50 "c:\\halo\\SOURCE\\cache\\physical_memory_map.c"
 	match_assert(__FILE__, __LINE__, (unsigned long)physical_memory_map_globals.tag_cache_base_address==TAG_CACHE_BASE_ADDRESS);
 
-	physical_memory_map_globals.texture_cache_base_address = XPhysicalAlloc(TEXTURE_CACHE_SIZE, -1, 0, PAGE_READWRITE | PAGE_WRITECOMBINE);
+	physical_memory_map_globals.texture_cache_base_address = XPhysicalAlloc(TEXTURE_CACHE_SIZE, TEXTURE_CACHE_PLACE, 0, PAGE_READWRITE | PAGE_WRITECOMBINE);
 #line 55 "c:\\halo\\SOURCE\\cache\\physical_memory_map.c"
 	match_assert(__FILE__, __LINE__, physical_memory_map_globals.texture_cache_base_address);
 
-	physical_memory_map_globals.sound_cache_base_address = XPhysicalAlloc(SOUND_CACHE_SIZE, -1, 0, PAGE_READWRITE);
+	physical_memory_map_globals.sound_cache_base_address = XPhysicalAlloc(SOUND_CACHE_SIZE, SOUND_CACHE_PLACE, 0, PAGE_READWRITE);
 #line 58 "c:\\halo\\SOURCE\\cache\\physical_memory_map.c"
 	match_assert(__FILE__, __LINE__, physical_memory_map_globals.sound_cache_base_address);
 

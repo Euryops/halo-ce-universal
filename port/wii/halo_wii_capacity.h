@@ -11,8 +11,17 @@ session, so its sizes need not agree with theirs.
 
 The fixed places, kept back from libogc's heap by port/wii/src/wii_main.c:
 
-  game state  0x81200000-0x81800000  the top 6 MB of MEM1
-  tag cache   0x90100000-0x91700000  22 MB at the foot of MEM2
+  game state     0x81200000-0x81800000  the top 6 MB of MEM1
+  tag cache      0x90100000-0x91700000  22 MB at the foot of MEM2
+  texture cache  0x91700000-0x92D00000  22 MB
+  sound cache    0x92D00000-0x93100000  4 MB
+
+What is left is the heap: MEM1 from the end of the program (about 14.5 MB
+of code, data and pooled globals) to the game state, then MEM2 from the
+sound cache to where IOS's memory starts (about 0x933E0000). libogc's sbrk
+fills MEM1 first and moves to MEM2 for good once a request does not fit,
+which is why nothing big may come from malloc: a 22 MB texture cache asked
+of the heap took it straight to MEM2 and left MEM1's 3.5 MB unused.
 
 The Xbox's maps are linked to a tag cache at 0x803A6000, where the Wii's
 own code is. The map converter (stage 2) rebases them to 0x90100000.
@@ -25,6 +34,12 @@ own code is. The map converter (stage 2) rebases them to 0x90100000.
 
 #define HALO_WII_TAG_CACHE_BASE_ADDRESS 0x90100000
 #define HALO_WII_TAG_CACHE_END 0x91700000
+#define HALO_WII_TEXTURE_CACHE_BASE_ADDRESS HALO_WII_TAG_CACHE_END
+#define HALO_WII_TEXTURE_CACHE_END (HALO_WII_TEXTURE_CACHE_BASE_ADDRESS + HALO_PORT_TEXTURE_CACHE_SIZE)
+#define HALO_WII_SOUND_CACHE_BASE_ADDRESS HALO_WII_TEXTURE_CACHE_END
+#define HALO_WII_SOUND_CACHE_END (HALO_WII_SOUND_CACHE_BASE_ADDRESS + 0x400000)
+/* the foot of the MEM2 heap */
+#define HALO_WII_FIXED_PLACES_END HALO_WII_SOUND_CACHE_END
 
 /* ---------- game state: the Xbox's 0x305000, with room for the larger
 player and network tables the port keeps (halo_port_limits.h) */

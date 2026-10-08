@@ -35,6 +35,30 @@ long wii_file_size(int file);
 /* 0, or -1 with errno set */
 int wii_make_directory(const char *path);
 
+/* what stat answers about a path or an open file: size in bytes and the
+last write as seconds since 1970; 0, or -1 with errno set */
+struct wii_path_information
+{
+	int kind;
+	unsigned long size;
+	long long modified;
+};
+
+int wii_path_information(const char *path, struct wii_path_information *information);
+int wii_file_information(int file, struct wii_path_information *information);
+
+/* the card's free and total bytes; 0, or -1 with errno set */
+int wii_disk_space(const char *path, unsigned long long *free_bytes, unsigned long long *total_bytes);
+
+/* a directory's entries one by one, without "." and ".." told apart: NULL
+with errno set when it cannot be opened, and 0 from next at the end */
+struct wii_directory;
+
+struct wii_directory *wii_directory_open(const char *path);
+int wii_directory_next(struct wii_directory *directory, char *name, unsigned long name_size,
+	struct wii_path_information *information);
+void wii_directory_close(struct wii_directory *directory);
+
 /* ---------- waitable objects: events, mutexes and threads */
 
 struct wii_waitable;

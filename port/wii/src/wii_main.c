@@ -77,7 +77,7 @@ top of MEM1 and the foot of MEM2, before anything is allocated there */
 static void reserve_fixed_places(void)
 {
 	SYS_SetArena1Hi((void *)HALO_PORT_GAME_STATE_BASE_ADDRESS);
-	SYS_SetArena2Lo((void *)HALO_WII_TAG_CACHE_END);
+	SYS_SetArena2Lo((void *)HALO_WII_FIXED_PLACES_END);
 }
 
 int __wrap_main(int argc, char **argv)
