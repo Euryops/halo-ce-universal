@@ -24,7 +24,8 @@ SD card, brings up a text console and runs the game's own `main`
 console is copied to `sd:/halo/debug.txt`, so a run on a real Wii can be read afterwards
 on a PC. With a `halo/maps` folder on the card (empty will do), the game's start-up shows:
 the memory it places, its cache thread starting, its `z:\` cache files made on the card,
-and then `failed to create D3D object`, where it stops: the renderer is stage 4. Without
+the GX device taking the screen (from then on the log is only on the card), and then a
+halt in DirectSound (`channel->stream`, `sound_dsound_xbox.c`): audio is stage 6. Without
 the folder it stops earlier, at `no valid map directory exists`. Each halt prints its
 stack; resolve the addresses with
 `powerpc-eabi-addr2line -f -e build/wii/halo.elf <address>...` in the devkitPPC image.
@@ -40,7 +41,8 @@ stack; resolve the addresses with
 | XAPI memory, time, errors, events, mutexes, threads, files, `ReadFileEx`/`WriteFileEx` | `src/wii_xbox.c` |
 | pooled COMMON globals, wide-char runtime, null Bink, empty xbdm | from `port/linux/src/`, unchanged |
 | the game's maths and zlib | `port/third_party/musl-math`, `port/third_party/zlib` |
-| everything else (Direct3D, DirectSound, XInput, XNet, files, ...) | `build/wii/wii_stubs.c` |
+| Direct3D, on GX (stage 4) | `src/d3d8_gx.c`, `src/d3d8_gx_resources.c`; `src/gx_backend.c` (libogc); `src/nv2a_vsh_run.c` |
+| everything else (DirectSound, XInput, XNet, ...) | `build/wii/wii_stubs.c` |
 
 `wii_stubs.c` is generated on each build by `gen_stubs.py` from what the first link
 pass finds missing: each stub prints `wii: stub: <name>` the first time it runs and
@@ -50,6 +52,51 @@ stub stops being generated.
 The XDK's headers and libogc's cannot be read by one unit (`BOOL`, `u32` and others
 clash), and the port's own `sys/stat.h` is MSVC's, so anything that needs libogc or
 newlib's `stat` goes in `wii_os.c` and is called through `wii_os.h` in plain C types.
+
+## The GX device (stage 4, first part)
+
+`src/d3d8_gx.c` is the Xbox Direct3D device on the Wii's GPU, where the Linux port has
+`d3d8_gl.c`. What it does, and what it does not do yet, is in its opening comment; in
+short:
+
+- **Vertex programs run on the CPU.** GX has no vertex programs, so each draw's vertices
+  are read from the game's buffers by the shader's declaration and run through the
+  game's own NV2A program by `src/nv2a_vsh_run.c`, an interpreter of the microcode with
+  the semantics of the Linux port's GLSL translation.
+- **GX's fixed transform does the projection.** The programs end in screen space; that
+  is undone to a clip position, and a perspective matrix is fitted to each draw (Halo's
+  depth is an affine function of w across a draw), so GX clips and interpolates
+  perspective-correctly, as the NV2A did.
+- **Textures:** the maps' bitmaps are in GX formats (the map converter's) and are sampled
+  in place, by the Direct3D format `HALO_WII_D3DFMT_GX + GX_TF_*` (`halo_wii_map.h`).
+  Textures the game makes as it runs, in Xbox formats, are converted to RGBA8 tiles.
+- **Render state:** depth, blending, alpha test, culling, color writes, viewport and
+  scissor, clears clipped to the viewport (split screen).
+- **Not yet:** the pixel shaders (each draw is texture 0 times the diffuse color: the
+  NV2A combiners to TEV is the next piece), render targets other than the back buffer
+  (shadows, water, screen effects are skipped and counted), visibility tests (all
+  visible), fog.
+
+The game's vertical blank callback, which its frame throttle waits on, runs at every
+blank from a thread above the game's (`gxb_set_vertical_blank_handler`).
+
+`src/gx_backend.c` is the libogc half, behind `src/gx_backend.h` in plain C types, for
+the same reason as `wii_os.h`.
+
+### Checking it
+
+    ./port/wii/tests/run.sh       # the interpreter against all 67 of the game's programs (host cc)
+
+With no maps the game cannot reach its menu, so `build.sh` also makes
+`build/wii/gxtest/sd/apps/halo-gxtest/boot.dol`, a scene (`gxtest/gxtest_scene.c`) that
+drives the device as the game does: the game's environment program (49) over a level of
+compressed BSP vertices with GX-format textures, the widget program (56) for a menu with
+Xbox-format textures made at run time, immediate mode, and checks for culling, the alpha
+test and clears. In Dolphin:
+
+    ~/euryo/scripts/dolphin/run.sh build/wii/gxtest/sd/apps/halo-gxtest/boot.dol 40 <outdir>
+
+and the last of `<outdir>/Dump/Frames/framedump_*.png` is the held frame.
 
 ## Files
 

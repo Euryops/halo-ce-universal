@@ -48,7 +48,8 @@ GAME="$ABI -std=gnu89 -D__STRICT_ANSI__ -w -include port/wii/halo_wii_prefix.h -
 PLATFORM="$ABI -std=gnu11 -D_GNU_SOURCE -DHALO_LINUX_PLATFORM_LAYER -w -include port/wii/halo_wii_prefix.h \
  -include $B/platform_sem.h -Iport/linux/src -Iport/linux/include -Iport/include -Isource -Isource/cseries \
  -idirafter port/include/xdk"
-export CC GAME PLATFORM B
+GXTEST="$PLATFORM -Iport/wii/src -Isource/rasterizer/xbox"
+export CC GAME PLATFORM GXTEST B
 
 # compile <source> <object> <flags variable>, if the object is older
 compile() {
@@ -100,6 +101,17 @@ STUBS="$ABI -std=gnu89 -w -fno-builtin"
 $CC $STUBS -c $B/wii_stubs.c -o $B/wii_stubs.o
 $CC "${LINK[@]}" $B/wii_stubs.o "${LIBS[@]}" -Wl,-Map,$B/halo.map -o $B/halo.elf
 $D/tools/bin/elf2dol $B/halo.elf $B/sd/apps/halo/boot.dol
+
+echo "==> GX test scene"
+# gxtest.dol: the GX device drawing a scene with the game's own vertex
+# programs, for when there are no maps (gxtest/gxtest_scene.c)
+mkdir -p $B/gxtest/sd/apps/halo-gxtest
+compile port/wii/gxtest/gxtest_scene.c $B/gxtest/gxtest_scene.o GXTEST
+compile port/wii/gxtest/gxtest_main.c $B/gxtest/gxtest_main.o LIBOGC
+$CC -mrvl -mcpu=750 -meabi -mhard-float $B/gxtest/gxtest_main.o $B/gxtest/gxtest_scene.o \
+	$B/platform/d3d8_gx.o $B/platform/d3d8_gx_resources.o $B/platform/gx_backend.o $B/platform/nv2a_vsh_run.o \
+	-L$D/libogc/lib/wii -logc -lm -o $B/gxtest/gxtest.elf
+$D/tools/bin/elf2dol $B/gxtest/gxtest.elf $B/gxtest/sd/apps/halo-gxtest/boot.dol
 
 echo "==> Homebrew Channel folder"
 cp port/wii/hbc/meta.xml port/wii/hbc/icon.png $B/sd/apps/halo/
